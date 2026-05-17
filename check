@@ -1,0 +1,2321 @@
+seekho 
+-- Seekho marketing dashboard — modified to negate `seekhomalayalam%` campaigns
+-- (operated from the Vidhya ad account) out of Seekho.
+
+WITH moloco_metrics AS (
+  WITH cost_etl AS (
+    SELECT DISTINCT
+        DATE(TIMESTAMP(date), "Asia/Kolkata") AS date_tz,
+        media_source,
+        app_id,
+        campaign,
+        ad_id AS ad,
+        original_cost,
+        installs
+    FROM `seekho-c084b.appsflyer.cost_etl`
+    WHERE TRUE
+      AND DATE(TIMESTAMP(date)) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND ( app_id IN ('android','com.seekho.android','ios','com.seekho.ios','web','com.seekho.web')
+            OR app_id IS NULL )
+      AND ( LOWER(campaign) NOT LIKE 'seekhomalayalam%' OR campaign IS NULL )
+  ),
+  mktg AS (
+    SELECT DISTINCT
+        date_tz,
+        media_source AS source,
+        SUM(CASE WHEN date_tz BETWEEN DATE '2025-09-01' AND DATE '2025-12-31' THEN original_cost ELSE 0 END) AS cost,
+        SUM(CASE WHEN date_tz BETWEEN DATE '2025-09-01' AND DATE '2025-12-31' THEN installs      ELSE 0 END) AS installs
+    FROM cost_etl
+    WHERE date_tz > "2025-09-01"
+      AND media_source = "moloco_int"
+    GROUP BY 1,2
+    ORDER BY 1
+  ),
+  downloads AS (
+    SELECT
+        DATE(`Install Time`,"Asia/Kolkata") AS date_tz,
+        CASE WHEN LOWER(`Media Source`) LIKE '%moloco%' THEN 'moloco' ELSE 'other' END AS source,
+        COUNT(DISTINCT `Advertising ID`) AS cnt
+    FROM `seekho-c084b.appsflyer.installs`
+    WHERE ( `Bundle ID` IN ('android','com.seekho.android','ios','com.seekho.ios','web','com.seekho.web')
+            OR `Bundle ID` IS NULL )
+      AND ( LOWER(campaign) NOT LIKE 'seekhomalayalam%' OR campaign IS NULL )
+    GROUP BY 1,2
+    ORDER BY 1 DESC
+  ),
+  downloads_agg AS (
+    SELECT date_tz, SUM(CASE WHEN source='moloco' THEN cnt ELSE 0 END) AS moloco_installs
+    FROM downloads
+    GROUP BY 1
+  ),
+  aggregated AS (
+    SELECT
+        DATE(date_tz) AS date,
+        SUM(CASE WHEN source LIKE '%moloco%' THEN cost     ELSE 0 END) AS moloco_cost,
+        SUM(CASE WHEN source LIKE '%moloco%' THEN installs ELSE 0 END) AS moloco_installs
+    FROM mktg
+    GROUP BY date_tz
+  )
+  SELECT
+      DATE(a.date) AS date_tz,
+      88*a.moloco_cost AS moloco_cost,
+      moloco_installs
+  FROM aggregated a
+  ORDER BY a.date DESC
+),
+
+-- NEW: profile_ids whose attributed install was on a Vidhya-account (seekhomalayalam%) campaign.
+vidhya_account_payers AS (
+    SELECT DISTINCT uai.profile_id
+    FROM `seekho-c084b.appsflyer.installs` i
+    JOIN `seekho-c084b.seekho.users_userappinfo` uai
+         ON i.`Advertising ID` = uai.advertising_id
+        AND uai.advertising_id NOT IN ('00000000-0000-0000-0000-000000000000','0000-0000')
+    WHERE DATE(i.`Install Time`,"Asia/Kolkata") >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND LOWER(i.campaign) LIKE 'seekhomalayalam%'
+),
+
+cost_etl AS (
+    SELECT DISTINCT
+        date,
+        media_source,
+        app_id,
+        campaign,
+        adset,
+        ad_id AS ad,
+        channel,
+        original_cost,
+        impressions,
+        clicks,
+        installs
+    FROM `seekho-c084b.appsflyer.cost_etl`
+    WHERE TRUE
+      AND DATE(TIMESTAMP(date)) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND LOWER(campaign) NOT LIKE '%resurrect%'
+      AND LOWER(campaign) NOT LIKE '%re-market%'
+      AND LOWER(campaign) NOT IN ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      AND LOWER(campaign) NOT LIKE '%reengagement%'
+      AND LOWER(campaign) NOT LIKE '%sab_%'
+      AND LOWER(campaign) NOT LIKE '%gtm%'
+      AND LOWER(adset)    NOT LIKE '%gtm%'
+      AND LOWER(campaign) NOT IN ('health scaling abo campaign')
+      AND LOWER(campaign) NOT LIKE 'seekhomalayalam%'
+      AND ( app_id IN ('android','com.seekho.android','ios','com.seekho.ios','web','com.seekho.web')
+            OR app_id IS NULL )
+),
+
+downloads AS (
+    SELECT DATE(`Install Time`,"Asia/Kolkata") AS date_tz,
+        CASE
+            WHEN LOWER(`Media Source`) LIKE '%googleadwords%' THEN 'google'
+            WHEN LOWER(`Media Source`) LIKE '%facebook%'      THEN 'facebook'
+            WHEN LOWER(`Media Source`) LIKE '%snapchat%'      THEN 'snapchat'
+            ELSE 'facebook'
+        END AS source,
+        COUNT(DISTINCT `Advertising ID`) AS cnt
+    FROM `seekho-c084b.appsflyer.installs`
+    WHERE ( `Bundle ID` IN ('android','com.seekho.android','ios','com.seekho.ios','web','com.seekho.web')
+            OR `Bundle ID` IS NULL )
+      AND ( LOWER(campaign) NOT LIKE 'seekhomalayalam%' OR campaign IS NULL )
+    GROUP BY 1,2
+    ORDER BY 1 DESC
+),
+downloads_agg AS (
+    SELECT date_tz,
+        SUM(CASE WHEN source='google'   THEN cnt ELSE 0 END) AS google_installs,
+        SUM(CASE WHEN source='facebook' THEN cnt ELSE 0 END) AS facebook_installs,
+        SUM(CASE WHEN source='snapchat' THEN cnt ELSE 0 END) AS snapchat_installs,
+        SUM(cnt)                                              AS total_installs
+    FROM downloads
+    GROUP BY 1
+),
+
+mktg_costs AS (
+    SELECT DISTINCT
+        DATE(TIMESTAMP(date)) AS date_tz,
+        LOWER(app_id)         AS app_id,
+        LOWER(media_source)   AS source,
+        LOWER(campaign)       AS campaign,
+        LOWER(adset)          AS adset,
+        LOWER(ad)             AS ad,
+        LOWER(channel)        AS channel,
+        MAX(original_cost)    AS cost,
+        MAX(impressions)      AS impressions,
+        MAX(clicks)           AS clicks,
+        MAX(installs)         AS installs
+    FROM cost_etl
+    WHERE DATE(TIMESTAMP(date)) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+    GROUP BY 1,2,3,4,5,6,7
+),
+mktg AS (
+    SELECT
+        date_tz,
+        CASE
+            WHEN source IS NULL                THEN 'null'
+            WHEN source LIKE '%googleadwords%' THEN 'google'
+            WHEN source LIKE '%facebook%'      THEN 'facebook'
+            WHEN source LIKE '%snapchat%'      THEN 'snapchat'
+            ELSE source
+        END AS source,
+        ROUND(SUM(cost))        AS total_cost,
+        ROUND(SUM(impressions)) AS impressions,
+        ROUND(SUM(clicks))      AS clicks,
+        ROUND(SUM(installs))    AS installs
+    FROM mktg_costs
+    GROUP BY 1,2
+    ORDER BY date_tz DESC, source DESC
+),
+aggregated AS (
+    SELECT
+        DATE(date_tz) AS date,
+        SUM(CASE WHEN source='google'   THEN total_cost ELSE 0 END) AS google_cost,
+        SUM(CASE WHEN source='facebook' THEN total_cost ELSE 0 END) AS facebook_cost,
+        SUM(CASE WHEN source='snapchat' THEN total_cost ELSE 0 END) AS snapchat_cost,
+        SUM(CASE WHEN source IN ('google','facebook','snapchat') THEN total_cost ELSE 0 END) AS total_cost,
+        SUM(CASE WHEN source='google'   THEN installs   ELSE 0 END) AS google_installs,
+        SUM(CASE WHEN source='facebook' THEN installs   ELSE 0 END) AS facebook_installs,
+        SUM(CASE WHEN source='snapchat' THEN installs   ELSE 0 END) AS snapchat_installs,
+        SUM(CASE WHEN source IN ('google','facebook','snapchat') THEN installs ELSE 0 END) AS total_installs,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source='facebook' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google','facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS facebook_pct_spend,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source='google'   THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google','facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS google_pct_spend,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source='snapchat' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google','facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS snapchat_pct_spend
+    FROM mktg
+    GROUP BY date_tz
+),
+
+paid AS (
+    SELECT DISTINCT
+        DATE(pph.purchased_on,"Asia/Kolkata") AS payment_date,
+        eo.id,
+        eo.profile_id,
+        eo.pgw_amount
+    FROM `seekho-c084b.seekho.experiments_order` eo
+    LEFT JOIN `seekho-c084b.seekho.experiments_profilepurchasehistory` pph ON eo.id = pph.order_id
+    LEFT JOIN `seekho-c084b.seekho.payments_subscriptionvalidity`      sv  ON pph.id = sv.purchase_record_id
+    WHERE eo.status = 'order_paid'
+      AND eo.premium_item_id IS NULL
+      AND eo.is_prod = TRUE
+      AND ( eo.order_source IN ('android','com.seekho.android','ios','com.seekho.ios','web','com.seekho.web')
+            OR eo.order_source IS NULL )
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND DATE(pph.purchased_on,"Asia/Kolkata") >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND DATE(pph.purchased_on,"Asia/Kolkata") <  CURRENT_DATE("Asia/Kolkata")
+      AND eo.profile_id NOT IN (SELECT profile_id FROM vidhya_account_payers)
+),
+ad_id AS (
+    SELECT DISTINCT
+        profile_id,
+        advertising_id AS gaid,
+        DATE(MAX(created_on),"Asia/Kolkata") AS date_created
+    FROM `seekho-c084b.seekho.users_userappinfo`
+    GROUP BY 1,2
+),
+
+u_duf AS (
+    SELECT DATE(date_tz) AS date_tz, user_id
+    FROM `seekho-c084b.analytics_growth.s_daily_user_funnel`
+    WHERE date_tz >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND date_tz <  CURRENT_DATE("Asia/Kolkata")
+      AND active_user = 1
+    UNION DISTINCT
+    SELECT DATE(date_tz) AS date_tz, user_id
+    FROM `seekho-c084b.analytics_growth.s_daily_user_funnel_intraday`
+    WHERE date_tz >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 1 DAY)
+      AND date_tz <  CURRENT_DATE("Asia/Kolkata")
+      AND active_user = 1
+),
+
+ula AS (
+    SELECT *, DATE(`Install Time`,"Asia/Kolkata") AS date_tz
+    FROM `seekho-c084b.appsflyer.installs`
+    WHERE DATE(`Install Time`,"Asia/Kolkata") >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND `Advertising ID` <> '00000000-0000-0000-0000-000000000000'
+      AND `Advertising ID` <> '0000-0000'
+      AND ( `Bundle ID` IN ('android','com.seekho.android','ios','com.seekho.ios',
+                            'web','com.seekho.web','com.seekho.androie','com.seekho.android.preprod')
+            OR `Bundle ID` IS NULL )
+      AND ( LOWER(campaign) NOT LIKE 'seekhomalayalam%' OR campaign IS NULL )
+),
+re AS (
+    SELECT DISTINCT
+        ula.date_tz AS date_tz,
+        firebase_uid AS user_id,
+        uup.user_ptr_id AS profile_id,
+        CASE
+             WHEN ula.`Media Source` IS NULL                  THEN 'null'
+             WHEN LOWER(`Media Source`) LIKE '%googleadwords%' THEN 'google'
+             WHEN LOWER(`Media Source`) LIKE '%facebook%'      THEN 'facebook'
+             WHEN LOWER(`Media Source`) LIKE '%snapchat%'      THEN 'snapchat'
+             ELSE LOWER(`Media Source`)
+        END AS source,
+        CASE WHEN ula.campaign IS NULL THEN 'null' ELSE LOWER(ula.campaign) END AS campaign,
+        CASE
+             WHEN ula.Adset IS NULL                       THEN 'null'
+             WHEN LOWER(ula.campaign) LIKE '%female%'     THEN CONCAT(LOWER(ula.Adset), " - female")
+             ELSE LOWER(ula.Adset)
+        END AS ad_set,
+        paid.payment_date,
+        paid.pgw_amount
+    FROM ula
+    LEFT JOIN ad_id
+           ON ula.`Advertising ID` = ad_id.gaid
+          AND ad_id.gaid NOT IN ('00000000-0000-0000-0000-000000000000','0000-0000')
+    LEFT JOIN `seekho-c084b.seekho.users_userprofile` uup ON ad_id.profile_id = uup.user_ptr_id
+    LEFT JOIN paid                                         ON uup.user_ptr_id = paid.profile_id
+),
+
+pre_d0_data AS (
+    SELECT
+        DATE(pph.purchased_on, "Asia/Kolkata") AS Payment_date,
+        (CASE
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on,  "Asia/Kolkata") AS DATE), DAY) >= 0
+              THEN eo.profile_id END) AS Total
+    FROM `seekho-c084b.seekho.experiments_order` AS eo
+    LEFT JOIN `seekho-c084b.seekho.experiments_profilepurchasehistory` AS pph ON eo.id = pph.order_id
+    LEFT JOIN `seekho-c084b.seekho.payments_subscriptionvalidity` AS ps        ON ps.purchase_record_id = pph.id
+    LEFT JOIN `seekho-c084b.seekho.users_userprofile` uup                      ON eo.profile_id = uup.user_ptr_id
+    WHERE eo.is_prod = TRUE
+      AND pph.is_prod = TRUE
+      AND eo.status = 'order_paid'
+      AND ( eo.order_source IN ('android','com.seekho.android','ios','com.seekho.ios','web','com.seekho.web')
+            OR eo.order_source IS NULL )
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND eo.premium_plan_id IS NOT NULL
+      AND CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE) >= '2025-01-01'
+      AND eo.profile_id NOT IN (SELECT profile_id FROM vidhya_account_payers)
+),
+
+d0_data AS (
+  SELECT
+    a.Payment_date,
+    COUNT(DISTINCT a.total) AS total
+  FROM pre_d0_data a
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM re b
+    WHERE a.total = b.profile_id
+      AND ( LOWER(b.campaign) LIKE '%gtm%'
+         OR LOWER(b.campaign) IN ('health scaling abo campaign')
+         OR LOWER(b.ad_set)   LIKE '%gtm%' )
+  )
+  GROUP BY 1
+),
+
+act_u AS (
+    SELECT date_tz, source, COUNT(DISTINCT user_id) AS active_users
+    FROM re
+    WHERE LOWER(campaign) NOT LIKE '%resurrect%'
+      AND LOWER(campaign) NOT LIKE '%re-market%'
+      AND LOWER(campaign) NOT IN ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      AND LOWER(campaign) NOT LIKE '%reengagement%'
+      AND LOWER(campaign) NOT LIKE '%sab_%'
+      AND LOWER(campaign) NOT LIKE '%gtm%'
+      AND LOWER(ad_set)   NOT LIKE '%gtm%'
+      AND LOWER(campaign) NOT IN ('health scaling abo campaign')
+    GROUP BY 1,2
+),
+
+f_act_u AS (
+    SELECT re.date_tz,
+        COUNT(DISTINCT CASE WHEN re.source='google'   THEN re.user_id END) AS google_active_users,
+        COUNT(DISTINCT CASE WHEN re.source='facebook' THEN re.user_id END) AS facebook_active_users,
+        COUNT(DISTINCT re.user_id)                                          AS total_active_users
+    FROM re
+    JOIN u_duf ON re.user_id = u_duf.user_id AND DATE_DIFF(re.date_tz, u_duf.date_tz, DAY) = 0
+    WHERE LOWER(campaign) NOT LIKE '%resurrect%'
+      AND LOWER(campaign) NOT LIKE '%re-market%'
+      AND LOWER(campaign) NOT IN ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      AND LOWER(campaign) NOT LIKE '%reengagement%'
+      AND LOWER(campaign) NOT LIKE '%sab_%'
+      AND LOWER(campaign) NOT LIKE '%gtm%'
+      AND LOWER(ad_set)   NOT LIKE '%gtm%'
+      AND LOWER(campaign) NOT IN ('health scaling abo campaign')
+    GROUP BY 1
+),
+
+pay_u AS (
+    SELECT date_tz, source,
+        COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) =  0 THEN user_id END) AS D0_paid_users,
+        COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) >  0 THEN user_id END) AS D0_plus_paid_users,
+        COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) <= 7 THEN user_id END) AS W0_paid_users,
+        COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) <=30 THEN user_id END) AS M0_paid_users
+    FROM re
+    WHERE LOWER(campaign) NOT LIKE '%resurrect%'
+      AND LOWER(campaign) NOT LIKE '%re-market%'
+      AND LOWER(campaign) NOT IN ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      AND LOWER(campaign) NOT LIKE '%reengagement%'
+      AND LOWER(campaign) NOT LIKE '%sab_%'
+      AND LOWER(campaign) NOT LIKE '%gtm%'
+      AND LOWER(ad_set)   NOT LIKE '%gtm%'
+      AND LOWER(campaign) NOT IN ('health scaling abo campaign')
+    GROUP BY 1,2
+),
+
+w0_count AS (
+    SELECT payment_date, COUNT(DISTINCT user_id) AS paid_users
+    FROM re
+    WHERE LOWER(campaign) NOT LIKE '%resurrect%'
+      AND LOWER(campaign) NOT LIKE '%re-market%'
+      AND LOWER(campaign) NOT IN ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      AND LOWER(campaign) NOT LIKE '%reengagement%'
+      AND LOWER(campaign) NOT LIKE '%sab_%'
+      AND LOWER(campaign) NOT LIKE '%gtm%'
+      AND LOWER(ad_set)   NOT LIKE '%gtm%'
+      AND LOWER(campaign) NOT IN ('health scaling abo campaign')
+    GROUP BY 1
+),
+
+d0_paid_metrics AS (
+  SELECT
+    pu.date_tz AS date,
+    SUM(pu.D0_paid_users)                                                AS d0_orders,
+    SUM(pu.D0_plus_paid_users)                                           AS d0_plus_orders,
+    SUM(CASE WHEN pu.source='google'   THEN pu.D0_paid_users ELSE 0 END) AS google_d0_orders,
+    SUM(CASE WHEN pu.source='facebook' THEN pu.D0_paid_users ELSE 0 END) AS facebook_d0_orders,
+    SUM(CASE WHEN pu.source='snapchat' THEN pu.D0_paid_users ELSE 0 END) AS snapchat_d0_orders,
+    SUM(CASE WHEN m.source='google'    THEN m.total_cost     ELSE 0 END) AS google_total_cost,
+    SUM(CASE WHEN m.source='facebook'  THEN m.total_cost     ELSE 0 END) AS facebook_total_cost,
+    SUM(CASE WHEN m.source='snapchat'  THEN m.total_cost     ELSE 0 END) AS snapchat_total_cost
+  FROM pay_u pu
+  LEFT JOIN mktg m ON pu.date_tz = m.date_tz AND pu.source = m.source
+  GROUP BY 1
+)
+
+SELECT
+    DATE(a.date) AS date,
+    a.google_cost,
+    a.facebook_cost,
+    a.snapchat_cost,
+    ROUND(COALESCE(m.moloco_cost,0)) AS moloco_cost,
+    ROUND(a.total_cost + COALESCE(m.moloco_cost,0)) AS total_cost,
+    SAFE_DIVIDE(100*a.google_cost,    a.total_cost + COALESCE(m.moloco_cost,0)) AS google_pct_spend,
+    SAFE_DIVIDE(100*a.facebook_cost,  a.total_cost + COALESCE(m.moloco_cost,0)) AS facebook_pct_spend,
+    SAFE_DIVIDE(100*a.snapchat_cost,  a.total_cost + COALESCE(m.moloco_cost,0)) AS snapchat_pct_spend,
+    SAFE_DIVIDE(100*COALESCE(m.moloco_cost,0), a.total_cost + COALESCE(m.moloco_cost,0)) AS moloco_pct_spend,
+    p.D0_orders,
+    d.total - p.D0_orders                                       AS D0_plus_orders,
+    SAFE_DIVIDE(100*p.D0_orders, d.total)                       AS D0_orders_share,
+    SAFE_DIVIDE(100*(d.total - p.D0_orders), d.total)           AS D0_plus_orders_share,
+    d.total                                                     AS total_orders,
+    p.google_d0_orders,
+    p.facebook_d0_orders,
+    p.snapchat_d0_orders,
+    SAFE_DIVIDE(p.google_total_cost,   p.google_d0_orders)      AS google_D0_CAC,
+    SAFE_DIVIDE(p.facebook_total_cost, p.facebook_d0_orders)    AS facebook_D0_CAC,
+    SAFE_DIVIDE(p.snapchat_total_cost, p.snapchat_d0_orders)    AS snapchat_D0_CAC,
+    SAFE_DIVIDE(a.total_cost + COALESCE(m.moloco_cost,0), p.D0_orders) AS D0_CAC,
+    SAFE_DIVIDE(a.total_cost + COALESCE(m.moloco_cost,0), d.total)     AS total_CAC,
+    agg.google_installs,
+    agg.facebook_installs,
+    agg.snapchat_installs,
+    agg.total_installs + COALESCE(m.moloco_installs,0) AS total_installs,
+    SAFE_DIVIDE(a.google_cost,    agg.google_installs)          AS google_CPI,
+    SAFE_DIVIDE(a.facebook_cost,  agg.facebook_installs)        AS facebook_CPI,
+    SAFE_DIVIDE(a.snapchat_cost,  agg.snapchat_installs)        AS snapchat_CPI,
+    SAFE_DIVIDE(a.total_cost + COALESCE(m.moloco_cost,0),
+                agg.total_installs + COALESCE(m.moloco_installs,0))     AS total_CPI,
+
+    SAFE_DIVIDE(100*p.D0_orders,
+                agg.total_installs + COALESCE(m.moloco_installs,0))     AS total_D0_conversion,
+    SAFE_DIVIDE(100*p.google_d0_orders,   agg.google_installs)          AS Google_D0_conversion,
+    SAFE_DIVIDE(100*p.facebook_d0_orders, agg.facebook_installs)        AS Facebook_D0_conversion,
+
+    SAFE_DIVIDE(100*f.total_active_users,
+                agg.total_installs + COALESCE(m.moloco_installs,0))     AS total_active_to_installs,
+    SAFE_DIVIDE(100*f.google_active_users,   agg.google_installs)       AS google_active_to_installs,
+    SAFE_DIVIDE(100*f.facebook_active_users, agg.facebook_installs)     AS Facebook_active_to_installs,
+
+    SAFE_DIVIDE(100*p.D0_orders,          f.total_active_users)         AS total_paid_to_active,
+    SAFE_DIVIDE(100*p.google_d0_orders,   f.google_active_users)        AS google_paid_to_active,
+    SAFE_DIVIDE(100*p.facebook_d0_orders, f.facebook_active_users)      AS Facebook_paid_to_active,
+
+    SUM(a.total_cost + COALESCE(m.moloco_cost,0)) OVER (
+        PARTITION BY EXTRACT(MONTH FROM a.date), EXTRACT(YEAR FROM a.date)
+        ORDER BY a.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS MTD_spends,
+    SUM(d.total) OVER (
+        PARTITION BY EXTRACT(MONTH FROM a.date), EXTRACT(YEAR FROM a.date)
+        ORDER BY a.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+    ) AS MTD_orders,
+    SAFE_DIVIDE(
+        SUM(a.total_cost + COALESCE(m.moloco_cost,0)) OVER (
+            PARTITION BY EXTRACT(MONTH FROM a.date), EXTRACT(YEAR FROM a.date)
+            ORDER BY a.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW),
+        SUM(d.total) OVER (
+            PARTITION BY EXTRACT(MONTH FROM a.date), EXTRACT(YEAR FROM a.date)
+            ORDER BY a.date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+    ) AS MTD_CAC
+
+FROM aggregated a
+LEFT JOIN d0_data          d   ON DATE(a.date) = DATE(d.Payment_date)
+LEFT JOIN d0_paid_metrics  p   ON DATE(a.date) = DATE(p.date)
+LEFT JOIN downloads_agg    agg ON DATE(a.date) = DATE(agg.date_tz)
+LEFT JOIN f_act_u          f   ON DATE(a.date) = DATE(f.date_tz)
+LEFT JOIN moloco_metrics   m   ON DATE(a.date) = DATE(m.date_tz)
+WHERE DATE(a.date) BETWEEN DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+                       AND DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 1 DAY)
+ORDER BY a.date DESC;
+
+arivu
+WITH cost_etl AS (
+    SELECT DISTINCT
+        date,
+        media_source,
+        app_id,
+        campaign,
+        adset,
+        ad_id AS ad,
+        channel,
+        original_cost,
+        impressions,
+        clicks,
+        installs
+    FROM `seekho-c084b.appsflyer.cost_etl`
+    WHERE TRUE
+      AND DATE(TIMESTAMP(date)) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      and lower(campaign) not like '%resurrect%'
+      and lower(campaign) not like '%re-market%'
+      and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      and lower(campaign) not like '%reengagement%'
+      and (app_id like '%arivu%')
+),
+
+downloads as
+(
+select DATE(`Install Time`,"Asia/Kolkata") as date_tz,
+CASE 
+WHEN lower(`Media Source`) LIKE '%googleadwords%' THEN 'google'
+WHEN lower(`Media Source`) LIKE '%facebook%' THEN 'facebook'
+WHEN lower(`Media Source`) LIKE '%snapchat%' THEN 'snapchat'
+else 'facebook' 
+END AS source,
+count(distinct `Advertising ID`) as cnt
+FROM
+seekho-c084b.appsflyer.installs
+where `Bundle ID` like '%arivu%'
+group by 1,2
+order by 1 desc
+),
+downloads_agg as
+(
+select date_tz,
+sum(case when source='google' then cnt else 0 end) as google_installs,
+sum(case when source='facebook' then cnt else 0 end) as facebook_installs,
+sum(case when source='snapchat' then cnt else 0 end) as snapchat_installs,
+sum(cnt) as total_installs
+from downloads
+group by 1
+),
+
+mktg_costs AS (
+    SELECT DISTINCT
+        DATE(TIMESTAMP(date)) AS date_tz,
+        LOWER(app_id) AS app_id,
+        LOWER(media_source) AS source,
+        LOWER(campaign) AS campaign,
+        LOWER(adset) AS adset,
+        LOWER(ad) AS ad,
+        LOWER(channel) AS channel,
+        MAX(original_cost) AS cost,
+        MAX(impressions) AS impressions,
+        MAX(clicks) AS clicks,
+        MAX(installs) AS installs
+    FROM cost_etl
+    WHERE TRUE
+      AND DATE(TIMESTAMP(date)) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+    GROUP BY 1,2,3,4,5,6,7
+),
+mktg AS (
+    SELECT 
+        date_tz,
+        CASE 
+            WHEN source IS NULL THEN 'null'
+            WHEN source LIKE '%googleadwords%' THEN 'google'
+            WHEN source LIKE '%facebook%' THEN 'facebook'
+            WHEN source LIKE '%snapchat%' THEN 'snapchat'
+            ELSE source 
+        END AS source,
+        ROUND(SUM(cost)) AS total_cost,
+        ROUND(SUM(impressions)) AS impressions,
+        ROUND(SUM(clicks)) AS clicks,
+        ROUND(SUM(installs)) AS installs
+    FROM mktg_costs
+    WHERE TRUE
+    GROUP BY 1,2
+    ORDER BY date_tz DESC, source DESC
+),
+aggregated AS (
+    SELECT 
+        date(date_tz) AS date,
+        SUM(CASE WHEN source = 'google' THEN total_cost ELSE 0 END) AS google_cost,
+        SUM(CASE WHEN source = 'facebook' THEN total_cost ELSE 0 END) AS facebook_cost,
+        SUM(CASE WHEN source = 'snapchat' THEN total_cost ELSE 0 END) AS snapchat_cost,
+        SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END) AS total_cost,
+        SUM(CASE WHEN source = 'google' THEN installs ELSE 0 END) AS google_installs,
+        SUM(CASE WHEN source = 'facebook' THEN installs ELSE 0 END) AS facebook_installs,
+        SUM(CASE WHEN source = 'snapchat' THEN installs ELSE 0 END) AS snapchat_installs,
+        SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN installs ELSE 0 END) AS total_installs,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source = 'facebook' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS facebook_pct_spend,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source = 'google' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS google_pct_spend,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source = 'snapchat' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS snapchat_pct_spend,      
+    FROM mktg
+    GROUP BY date_tz
+),
+
+
+-- CTE from your experiments_order query (D0 and D0_Plus)
+d0_data AS (
+    SELECT 
+        DATE(pph.purchased_on, "Asia/Kolkata") AS Payment_date,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) = 0 
+              THEN eo.profile_id END) AS D0,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) > 0 
+              THEN eo.profile_id END) AS D0_Plus,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) >= 0 
+              THEN eo.profile_id END) AS Total,
+    FROM seekho.experiments_order AS eo
+    LEFT JOIN seekho.experiments_profilepurchasehistory AS pph ON eo.id = pph.order_id
+    LEFT JOIN seekho.payments_subscriptionvalidity AS ps ON ps.purchase_record_id = pph.id
+    LEFT JOIN seekho.users_userprofile uup ON eo.profile_id = uup.user_ptr_id
+    WHERE eo.is_prod = TRUE 
+      AND pph.is_prod = TRUE
+      AND eo.status = 'order_paid'
+      AND (eo.order_source like '%arivu%')
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND eo.premium_plan_id IS NOT NULL
+      AND CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE) >= '2025-01-01'
+    GROUP BY DATE(pph.purchased_on, "Asia/Kolkata")
+),
+
+
+-- CTEs from your attribution/engagement logic (used in pay_u)
+paid AS (
+    SELECT 
+        DISTINCT 
+        DATE(pph.purchased_on,"Asia/Kolkata") AS payment_date,
+        eo.id,
+        eo.profile_id,
+        pgw_amount
+    FROM seekho.experiments_order eo
+    LEFT JOIN seekho.experiments_profilepurchasehistory pph ON eo.id = pph.order_id 
+    LEFT JOIN `seekho-c084b.seekho.payments_subscriptionvalidity` sv ON pph.id = sv.purchase_record_id
+    WHERE TRUE
+      AND eo.status = 'order_paid'
+      AND eo.premium_item_id IS NULL 
+      AND eo.is_prod = TRUE
+	  AND (eo.order_source like '%arivu%')
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND DATE(pph.purchased_on, 'Asia/Kolkata') >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND DATE(pph.purchased_on, 'Asia/Kolkata') < CURRENT_DATE("Asia/Kolkata")
+),
+ad_id AS (
+    SELECT DISTINCT 
+        profile_id,
+        advertising_id AS gaid,
+        DATE(MAX(created_on),"Asia/Kolkata") AS date_created
+    FROM `seekho-c084b.seekho.users_userappinfo`
+    WHERE TRUE
+    GROUP BY 1,2
+),
+
+u_duf AS (
+    SELECT date(date_tz) as date_tz, user_id
+    FROM analytics_growth.s_daily_user_funnel
+    WHERE date_tz >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND date_tz < CURRENT_DATE("Asia/Kolkata")
+      and active_user=1
+    UNION DISTINCT
+    SELECT date(date_tz) as date_tz, user_id
+    FROM analytics_growth.s_daily_user_funnel_intraday
+    WHERE date_tz >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 1 DAY)
+      AND date_tz < CURRENT_DATE("Asia/Kolkata")
+      and active_user=1
+),
+
+ula AS (
+    SELECT *, DATE(`Install Time`,"Asia/Kolkata") as date_tz
+    FROM seekho-c084b.appsflyer.installs
+    WHERE DATE(`Install Time`) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND `Advertising ID` <> '00000000-0000-0000-0000-000000000000'
+      AND `Advertising ID` <> '0000-0000'
+      and (`Bundle ID` like '%arivu%')
+),
+re AS (
+    SELECT DISTINCT
+        ula.date_tz AS date_tz,
+        firebase_uid AS user_id,
+        CASE 
+             WHEN ula.`Media Source` IS NULL THEN 'null'
+             WHEN LOWER(`Media Source`) LIKE '%googleadwords%' THEN 'google'
+             WHEN LOWER(`Media Source`) LIKE '%facebook%' THEN 'facebook'
+             WHEN LOWER(`Media Source`) LIKE '%snapchat%' THEN 'snapchat'
+             ELSE LOWER(`Media Source`)
+        END AS source,
+        CASE 
+             WHEN ula.campaign IS NULL THEN 'null'
+             ELSE LOWER(ula.campaign)
+        END AS campaign,
+        CASE 
+             WHEN ula.Adset IS NULL THEN 'null'
+             WHEN LOWER(ula.campaign) LIKE '%female%' THEN CONCAT(LOWER(ula.Adset), " - female")
+             ELSE LOWER(ula.Adset)
+        END AS ad_set,
+        paid.payment_date,
+        paid.pgw_amount
+    FROM ula
+    LEFT JOIN ad_id ON ula.`Advertising ID` = ad_id.gaid AND ad_id.gaid NOT IN ('00000000-0000-0000-0000-000000000000', '0000-0000')
+    LEFT JOIN seekho.users_userprofile uup ON ad_id.profile_id = uup.user_ptr_id 
+    LEFT JOIN paid ON uup.user_ptr_id = paid.profile_id
+    WHERE TRUE
+),
+act_u AS (
+    SELECT date_tz,
+           source,
+           COUNT(DISTINCT user_id) AS active_users
+    FROM re
+    WHERE TRUE
+    and lower(campaign) not like '%resurrect%'
+    and lower(campaign) not like '%re-market%'
+    and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+    and lower(campaign) not like '%reengagement%'
+    GROUP BY 1,2
+),
+
+f_act_u AS (
+    SELECT re.date_tz,
+    count(distinct case when re.source = 'google' THEN re.user_id else null end) as google_active_users,
+    count(distinct case when re.source = 'facebook' THEN re.user_id else null end) as facebook_active_users,
+    COUNT(DISTINCT re.user_id) AS total_active_users
+    FROM re
+    join u_duf on re.user_id= u_duf.user_id and date_diff(re.date_tz,u_duf.date_tz,day)=0
+    WHERE TRUE
+    and lower(campaign) not like '%resurrect%'
+    and lower(campaign) not like '%re-market%'
+    and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+    and lower(campaign) not like '%reengagement%'
+    GROUP BY 1
+),
+pay_u AS (
+    SELECT date_tz,
+           source,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) = 0 THEN user_id ELSE NULL END) AS D0_paid_users,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) > 0 THEN user_id ELSE NULL END) AS D0_plus_paid_users,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) <= 7 THEN user_id ELSE NULL END) AS W0_paid_users,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) <= 30 THEN user_id ELSE NULL END) AS M0_paid_users,
+    FROM re
+    WHERE TRUE
+    and lower(campaign) not like '%resurrect%'
+    and lower(campaign) not like '%re-market%'
+    and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+    and lower(campaign) not like '%reengagement%'
+    GROUP BY 1,2
+),
+
+w0_count as (
+    select
+        payment_date
+        , count(distinct user_id) as paid_users
+    from re
+    WHERE lower(campaign) not like '%resurrect%'
+      and lower(campaign) not like '%re-market%'
+      and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      and lower(campaign) not like '%reengagement%'
+
+    GROUP BY 1
+),
+
+
+d0_paid_metrics AS (
+  SELECT 
+    pu.date_tz AS date,
+    SUM(pu.D0_paid_users) AS d0_orders,
+    SUM(pu.D0_plus_paid_users) AS d0_plus_orders,
+    SUM(CASE WHEN pu.source = 'google' THEN pu.D0_paid_users ELSE 0 END) AS google_d0_orders,
+    SUM(CASE WHEN pu.source = 'facebook' THEN pu.D0_paid_users ELSE 0 END) AS facebook_d0_orders,
+    SUM(CASE WHEN pu.source = 'snapchat' THEN pu.D0_paid_users ELSE 0 END) AS snapchat_d0_orders,
+    SUM(CASE WHEN m.source = 'google' THEN m.total_cost ELSE 0 END) AS google_total_cost,
+    SUM(CASE WHEN m.source = 'facebook' THEN m.total_cost ELSE 0 END) AS facebook_total_cost,
+    SUM(CASE WHEN m.source = 'snapchat' THEN m.total_cost ELSE 0 END) AS snapchat_total_cost
+    
+  FROM pay_u pu
+  LEFT JOIN mktg m ON pu.date_tz = m.date_tz AND pu.source = m.source
+  GROUP BY 1
+)
+
+SELECT 
+    date(a.date) as date,
+    a.google_cost,
+    a.facebook_cost,
+    a.snapchat_cost,
+    a.total_cost,
+    a.google_pct_spend,
+    a.facebook_pct_spend,
+    a.snapchat_pct_spend,
+    p.D0_orders,
+    d.total-p.D0_orders as D0_plus_orders,
+    SAFE_DIVIDE(100*p.D0_orders,d.total) as D0_orders_share,
+    SAFE_DIVIDE(100*(d.total-p.D0_orders),d.total) as D0_plus_orders_share,
+    d.total as total_orders,
+    p.google_d0_orders,
+    p.facebook_d0_orders,
+    p.snapchat_d0_orders,
+    SAFE_DIVIDE(p.google_total_cost, p.google_d0_orders) AS google_D0_CAC,
+    SAFE_DIVIDE(p.facebook_total_cost, p.facebook_d0_orders) AS facebook_D0_CAC,
+    SAFE_DIVIDE(p.snapchat_total_cost, p.snapchat_d0_orders) AS snapchat_D0_CAC,
+    SAFE_DIVIDE(a.total_cost, p.D0_orders) AS D0_CAC,
+    SAFE_DIVIDE(a.total_cost, d.total) AS total_CAC,
+    agg.google_installs,
+    agg.facebook_installs,
+    agg.snapchat_installs,
+    agg.total_installs,
+    SAFE_DIVIDE(a.google_cost, agg.google_installs) AS google_CPI,
+    SAFE_DIVIDE(a.facebook_cost, agg.facebook_installs) AS facebook_CPI,
+    SAFE_DIVIDE(a.snapchat_cost, agg.snapchat_installs) AS snapchat_CPI,
+    SAFE_DIVIDE(a.total_cost, agg.total_installs) AS total_CPI,
+    
+	SAFE_DIVIDE(100*p.D0_orders, agg.total_installs) AS total_D0_conversion,
+	SAFE_DIVIDE(100*p.google_d0_orders, agg.google_installs) AS Google_D0_conversion,
+	SAFE_DIVIDE(100*p.facebook_d0_orders, agg.facebook_installs) AS Facebook_D0_conversion,
+
+    SAFE_DIVIDE(100*f.total_active_users, agg.total_installs) AS total_active_to_installs,
+	SAFE_DIVIDE(100*f.google_active_users, agg.google_installs) AS google_active_to_installs,
+	SAFE_DIVIDE(100*f.facebook_active_users, agg.facebook_installs) AS Facebook_active_to_installs,
+
+    SAFE_DIVIDE(100*p.D0_orders,f.total_active_users) AS total_paid_to_active,
+	SAFE_DIVIDE(100*p.google_d0_orders, f.google_active_users) AS google_paid_to_active,
+	SAFE_DIVIDE(100*p.facebook_d0_orders, f.facebook_active_users) AS Facebook_paid_to_active
+
+FROM aggregated a
+LEFT JOIN d0_data d ON date(a.date) = date(d.Payment_date)
+LEFT JOIN d0_paid_metrics p ON date(a.date) = date(p.date)
+left join downloads_agg agg on date(a.date)=date(agg.date_tz)
+left join f_act_u f on date(a.date) = date(f.date_tz)
+where date(a.date) between DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY) and DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 1 DAY)
+-- and extract(day from date(a.date)) != 31
+ORDER BY a.date DESC
+
+nerchuko 
+WITH cost_etl AS (
+    SELECT DISTINCT
+        date,
+        media_source,
+        app_id,
+        campaign,
+        adset,
+        ad_id AS ad,
+        channel,
+        original_cost,
+        impressions,
+        clicks,
+        installs
+    FROM `seekho-c084b.appsflyer.cost_etl`
+    WHERE TRUE
+      AND DATE(TIMESTAMP(date)) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      and lower(campaign) not like '%resurrect%'
+      and lower(campaign) not like '%re-market%'
+      and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      and lower(campaign) not like '%reengagement%'
+      and (app_id like '%nerchuko%')
+),
+
+downloads as
+(
+select DATE(`Install Time`,"Asia/Kolkata") as date_tz,
+CASE 
+WHEN lower(`Media Source`) LIKE '%googleadwords%' THEN 'google'
+WHEN lower(`Media Source`) LIKE '%facebook%' THEN 'facebook'
+WHEN lower(`Media Source`) LIKE '%snapchat%' THEN 'snapchat'
+else 'facebook' 
+END AS source,
+count(distinct `Advertising ID`) as cnt
+FROM
+seekho-c084b.appsflyer.installs
+where `Bundle ID` like '%nerchuko%'
+group by 1,2
+order by 1 desc
+),
+downloads_agg as
+(
+select date_tz,
+sum(case when source='google' then cnt else 0 end) as google_installs,
+sum(case when source='facebook' then cnt else 0 end) as facebook_installs,
+sum(case when source='snapchat' then cnt else 0 end) as snapchat_installs,
+sum(cnt) as total_installs
+from downloads
+group by 1
+),
+
+mktg_costs AS (
+    SELECT DISTINCT
+        DATE(TIMESTAMP(date)) AS date_tz,
+        LOWER(app_id) AS app_id,
+        LOWER(media_source) AS source,
+        LOWER(campaign) AS campaign,
+        LOWER(adset) AS adset,
+        LOWER(ad) AS ad,
+        LOWER(channel) AS channel,
+        MAX(original_cost) AS cost,
+        MAX(impressions) AS impressions,
+        MAX(clicks) AS clicks,
+        MAX(installs) AS installs
+    FROM cost_etl
+    WHERE TRUE
+      AND DATE(TIMESTAMP(date)) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+    GROUP BY 1,2,3,4,5,6,7
+),
+mktg AS (
+    SELECT 
+        date_tz,
+        CASE 
+            WHEN source IS NULL THEN 'null'
+            WHEN source LIKE '%googleadwords%' THEN 'google'
+            WHEN source LIKE '%facebook%' THEN 'facebook'
+            WHEN source LIKE '%snapchat%' THEN 'snapchat'
+            ELSE source 
+        END AS source,
+        ROUND(SUM(cost)) AS total_cost,
+        ROUND(SUM(impressions)) AS impressions,
+        ROUND(SUM(clicks)) AS clicks,
+        ROUND(SUM(installs)) AS installs
+    FROM mktg_costs
+    WHERE TRUE
+    GROUP BY 1,2
+    ORDER BY date_tz DESC, source DESC
+),
+aggregated AS (
+    SELECT 
+        date(date_tz) AS date,
+        SUM(CASE WHEN source = 'google' THEN total_cost ELSE 0 END) AS google_cost,
+        SUM(CASE WHEN source = 'facebook' THEN total_cost ELSE 0 END) AS facebook_cost,
+        SUM(CASE WHEN source = 'snapchat' THEN total_cost ELSE 0 END) AS snapchat_cost,
+        SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END) AS total_cost,
+        SUM(CASE WHEN source = 'google' THEN installs ELSE 0 END) AS google_installs,
+        SUM(CASE WHEN source = 'facebook' THEN installs ELSE 0 END) AS facebook_installs,
+        SUM(CASE WHEN source = 'snapchat' THEN installs ELSE 0 END) AS snapchat_installs,
+        SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN installs ELSE 0 END) AS total_installs,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source = 'facebook' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS facebook_pct_spend,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source = 'google' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS google_pct_spend,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source = 'snapchat' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS snapchat_pct_spend,      
+    FROM mktg
+    GROUP BY date_tz
+),
+
+
+-- CTE from your experiments_order query (D0 and D0_Plus)
+d0_data AS (
+    SELECT 
+        DATE(pph.purchased_on, "Asia/Kolkata") AS Payment_date,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) = 0 
+              THEN eo.profile_id END) AS D0,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) > 0 
+              THEN eo.profile_id END) AS D0_Plus,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) >= 0 
+              THEN eo.profile_id END) AS Total,
+    FROM seekho.experiments_order AS eo
+    LEFT JOIN seekho.experiments_profilepurchasehistory AS pph ON eo.id = pph.order_id
+    LEFT JOIN seekho.payments_subscriptionvalidity AS ps ON ps.purchase_record_id = pph.id
+    LEFT JOIN seekho.users_userprofile uup ON eo.profile_id = uup.user_ptr_id
+    WHERE eo.is_prod = TRUE 
+      AND pph.is_prod = TRUE
+      AND eo.status = 'order_paid'
+      AND (eo.order_source like '%nerchuko%')
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND eo.premium_plan_id IS NOT NULL
+      AND CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE) >= '2025-01-01'
+    GROUP BY DATE(pph.purchased_on, "Asia/Kolkata")
+),
+
+
+-- CTEs from your attribution/engagement logic (used in pay_u)
+paid AS (
+    SELECT 
+        DISTINCT 
+        DATE(pph.purchased_on,"Asia/Kolkata") AS payment_date,
+        eo.id,
+        eo.profile_id,
+        pgw_amount
+    FROM seekho.experiments_order eo
+    LEFT JOIN seekho.experiments_profilepurchasehistory pph ON eo.id = pph.order_id 
+    LEFT JOIN `seekho-c084b.seekho.payments_subscriptionvalidity` sv ON pph.id = sv.purchase_record_id
+    WHERE TRUE
+      AND eo.status = 'order_paid'
+      AND eo.premium_item_id IS NULL 
+      AND eo.is_prod = TRUE
+	  AND (eo.order_source like '%nerchuko%')
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND DATE(pph.purchased_on, 'Asia/Kolkata') >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND DATE(pph.purchased_on, 'Asia/Kolkata') < CURRENT_DATE("Asia/Kolkata")
+),
+ad_id AS (
+    SELECT DISTINCT 
+        profile_id,
+        advertising_id AS gaid,
+        DATE(MAX(created_on),"Asia/Kolkata") AS date_created
+    FROM `seekho-c084b.seekho.users_userappinfo`
+    WHERE TRUE
+    GROUP BY 1,2
+),
+
+u_duf AS (
+    SELECT date(date_tz) as date_tz, user_id
+    FROM analytics_growth.s_daily_user_funnel
+    WHERE date_tz >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND date_tz < CURRENT_DATE("Asia/Kolkata")
+      and active_user=1
+    UNION DISTINCT
+    SELECT date(date_tz) as date_tz, user_id
+    FROM analytics_growth.s_daily_user_funnel_intraday
+    WHERE date_tz >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 1 DAY)
+      AND date_tz < CURRENT_DATE("Asia/Kolkata")
+      and active_user=1
+),
+
+ula AS (
+    SELECT *, DATE(`Install Time`,"Asia/Kolkata") as date_tz
+    FROM seekho-c084b.appsflyer.installs
+    WHERE DATE(`Install Time`) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND `Advertising ID` <> '00000000-0000-0000-0000-000000000000'
+      AND `Advertising ID` <> '0000-0000'
+      and (`Bundle ID` like '%nerchuko%')
+),
+re AS (
+    SELECT DISTINCT
+        ula.date_tz AS date_tz,
+        firebase_uid AS user_id,
+        CASE 
+             WHEN ula.`Media Source` IS NULL THEN 'null'
+             WHEN LOWER(`Media Source`) LIKE '%googleadwords%' THEN 'google'
+             WHEN LOWER(`Media Source`) LIKE '%facebook%' THEN 'facebook'
+             WHEN LOWER(`Media Source`) LIKE '%snapchat%' THEN 'snapchat'
+             ELSE LOWER(`Media Source`)
+        END AS source,
+        CASE 
+             WHEN ula.campaign IS NULL THEN 'null'
+             ELSE LOWER(ula.campaign)
+        END AS campaign,
+        CASE 
+             WHEN ula.Adset IS NULL THEN 'null'
+             WHEN LOWER(ula.campaign) LIKE '%female%' THEN CONCAT(LOWER(ula.Adset), " - female")
+             ELSE LOWER(ula.Adset)
+        END AS ad_set,
+        paid.payment_date,
+        paid.pgw_amount
+    FROM ula
+    LEFT JOIN ad_id ON ula.`Advertising ID` = ad_id.gaid AND ad_id.gaid NOT IN ('00000000-0000-0000-0000-000000000000', '0000-0000')
+    LEFT JOIN seekho.users_userprofile uup ON ad_id.profile_id = uup.user_ptr_id 
+    LEFT JOIN paid ON uup.user_ptr_id = paid.profile_id
+    WHERE TRUE
+),
+act_u AS (
+    SELECT date_tz,
+           source,
+           COUNT(DISTINCT user_id) AS active_users
+    FROM re
+    WHERE TRUE
+    and lower(campaign) not like '%resurrect%'
+    and lower(campaign) not like '%re-market%'
+    and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+    and lower(campaign) not like '%reengagement%'
+    GROUP BY 1,2
+),
+
+f_act_u AS (
+    SELECT re.date_tz,
+    count(distinct case when re.source = 'google' THEN re.user_id else null end) as google_active_users,
+    count(distinct case when re.source = 'facebook' THEN re.user_id else null end) as facebook_active_users,
+    COUNT(DISTINCT re.user_id) AS total_active_users
+    FROM re
+    join u_duf on re.user_id= u_duf.user_id and date_diff(re.date_tz,u_duf.date_tz,day)=0
+    WHERE TRUE
+    and lower(campaign) not like '%resurrect%'
+    and lower(campaign) not like '%re-market%'
+    and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+    and lower(campaign) not like '%reengagement%'
+    GROUP BY 1
+),
+pay_u AS (
+    SELECT date_tz,
+           source,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) = 0 THEN user_id ELSE NULL END) AS D0_paid_users,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) > 0 THEN user_id ELSE NULL END) AS D0_plus_paid_users,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) <= 7 THEN user_id ELSE NULL END) AS W0_paid_users,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) <= 30 THEN user_id ELSE NULL END) AS M0_paid_users,
+    FROM re
+    WHERE TRUE
+    and lower(campaign) not like '%resurrect%'
+    and lower(campaign) not like '%re-market%'
+    and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+    and lower(campaign) not like '%reengagement%'
+    GROUP BY 1,2
+),
+
+w0_count as (
+    select
+        payment_date
+        , count(distinct user_id) as paid_users
+    from re
+    WHERE lower(campaign) not like '%resurrect%'
+      and lower(campaign) not like '%re-market%'
+      and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      and lower(campaign) not like '%reengagement%'
+
+    GROUP BY 1
+),
+
+
+d0_paid_metrics AS (
+  SELECT 
+    pu.date_tz AS date,
+    SUM(pu.D0_paid_users) AS d0_orders,
+    SUM(pu.D0_plus_paid_users) AS d0_plus_orders,
+    SUM(CASE WHEN pu.source = 'google' THEN pu.D0_paid_users ELSE 0 END) AS google_d0_orders,
+    SUM(CASE WHEN pu.source = 'facebook' THEN pu.D0_paid_users ELSE 0 END) AS facebook_d0_orders,
+    SUM(CASE WHEN pu.source = 'snapchat' THEN pu.D0_paid_users ELSE 0 END) AS snapchat_d0_orders,
+    SUM(CASE WHEN m.source = 'google' THEN m.total_cost ELSE 0 END) AS google_total_cost,
+    SUM(CASE WHEN m.source = 'facebook' THEN m.total_cost ELSE 0 END) AS facebook_total_cost,
+    SUM(CASE WHEN m.source = 'snapchat' THEN m.total_cost ELSE 0 END) AS snapchat_total_cost
+    
+  FROM pay_u pu
+  LEFT JOIN mktg m ON pu.date_tz = m.date_tz AND pu.source = m.source
+  GROUP BY 1
+)
+
+SELECT 
+    date(a.date) as date,
+    a.google_cost,
+    a.facebook_cost,
+    a.snapchat_cost,
+    a.total_cost,
+    a.google_pct_spend,
+    a.facebook_pct_spend,
+    a.snapchat_pct_spend,
+    p.D0_orders,
+    d.total-p.D0_orders as D0_plus_orders,
+    SAFE_DIVIDE(100*p.D0_orders,d.total) as D0_orders_share,
+    SAFE_DIVIDE(100*(d.total-p.D0_orders),d.total) as D0_plus_orders_share,
+    d.total as total_orders,
+    p.google_d0_orders,
+    p.facebook_d0_orders,
+    p.snapchat_d0_orders,
+    SAFE_DIVIDE(p.google_total_cost, p.google_d0_orders) AS google_D0_CAC,
+    SAFE_DIVIDE(p.facebook_total_cost, p.facebook_d0_orders) AS facebook_D0_CAC,
+    SAFE_DIVIDE(p.snapchat_total_cost, p.snapchat_d0_orders) AS snapchat_D0_CAC,
+    SAFE_DIVIDE(a.total_cost, p.D0_orders) AS D0_CAC,
+    SAFE_DIVIDE(a.total_cost, d.total) AS total_CAC,
+    agg.google_installs,
+    agg.facebook_installs,
+    agg.snapchat_installs,
+    agg.total_installs,
+    SAFE_DIVIDE(a.google_cost, agg.google_installs) AS google_CPI,
+    SAFE_DIVIDE(a.facebook_cost, agg.facebook_installs) AS facebook_CPI,
+    SAFE_DIVIDE(a.snapchat_cost, agg.snapchat_installs) AS snapchat_CPI,
+    SAFE_DIVIDE(a.total_cost, agg.total_installs) AS total_CPI,
+    
+	SAFE_DIVIDE(100*p.D0_orders, agg.total_installs) AS total_D0_conversion,
+	SAFE_DIVIDE(100*p.google_d0_orders, agg.google_installs) AS Google_D0_conversion,
+	SAFE_DIVIDE(100*p.facebook_d0_orders, agg.facebook_installs) AS Facebook_D0_conversion,
+
+    SAFE_DIVIDE(100*f.total_active_users, agg.total_installs) AS total_active_to_installs,
+	SAFE_DIVIDE(100*f.google_active_users, agg.google_installs) AS google_active_to_installs,
+	SAFE_DIVIDE(100*f.facebook_active_users, agg.facebook_installs) AS Facebook_active_to_installs,
+
+    SAFE_DIVIDE(100*p.D0_orders,f.total_active_users) AS total_paid_to_active,
+	SAFE_DIVIDE(100*p.google_d0_orders, f.google_active_users) AS google_paid_to_active,
+	SAFE_DIVIDE(100*p.facebook_d0_orders, f.facebook_active_users) AS Facebook_paid_to_active
+
+FROM aggregated a
+LEFT JOIN d0_data d ON date(a.date) = date(d.Payment_date)
+LEFT JOIN d0_paid_metrics p ON date(a.date) = date(p.date)
+left join downloads_agg agg on date(a.date)=date(agg.date_tz)
+left join f_act_u f on date(a.date) = date(f.date_tz)
+where date(a.date) between DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY) and DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 1 DAY)
+-- and extract(day from date(a.date)) != 31
+ORDER BY a.date DESC
+
+vidhya 
+
+-- Vidhya marketing dashboard — modified to re-attribute `seekhomalayalam%`
+-- campaigns (operated from the Vidhya ad account) from Seekho into Vidhya.
+
+WITH cost_etl AS (
+    SELECT DISTINCT
+        date,
+        media_source,
+        app_id,
+        campaign,
+        adset,
+        ad_id AS ad,
+        channel,
+        original_cost,
+        impressions,
+        clicks,
+        installs
+    FROM `seekho-c084b.appsflyer.cost_etl`
+    WHERE TRUE
+      AND DATE(TIMESTAMP(date)) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND LOWER(campaign) NOT LIKE '%resurrect%'
+      AND LOWER(campaign) NOT LIKE '%re-market%'
+      AND LOWER(campaign) NOT IN ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      AND LOWER(campaign) NOT LIKE '%reengagement%'
+      AND (
+            app_id LIKE '%vidhya%'
+         OR LOWER(campaign) LIKE 'seekhomalayalam%'
+      )
+),
+
+downloads AS (
+    SELECT DATE(`Install Time`,"Asia/Kolkata") AS date_tz,
+        CASE
+            WHEN LOWER(`Media Source`) LIKE '%googleadwords%' THEN 'google'
+            WHEN LOWER(`Media Source`) LIKE '%facebook%'      THEN 'facebook'
+            WHEN LOWER(`Media Source`) LIKE '%snapchat%'      THEN 'snapchat'
+            ELSE 'facebook'
+        END AS source,
+        COUNT(DISTINCT `Advertising ID`) AS cnt
+    FROM `seekho-c084b.appsflyer.installs`
+    WHERE (
+            `Bundle ID` LIKE '%vidhya%'
+         OR LOWER(campaign) LIKE 'seekhomalayalam%'
+    )
+    GROUP BY 1,2
+),
+downloads_agg AS (
+    SELECT date_tz,
+        SUM(CASE WHEN source='google'   THEN cnt ELSE 0 END) AS google_installs,
+        SUM(CASE WHEN source='facebook' THEN cnt ELSE 0 END) AS facebook_installs,
+        SUM(CASE WHEN source='snapchat' THEN cnt ELSE 0 END) AS snapchat_installs,
+        SUM(cnt)                                              AS total_installs
+    FROM downloads
+    GROUP BY 1
+),
+
+mktg_costs AS (
+    SELECT DISTINCT
+        DATE(TIMESTAMP(date)) AS date_tz,
+        LOWER(app_id)         AS app_id,
+        LOWER(media_source)   AS source,
+        LOWER(campaign)       AS campaign,
+        LOWER(adset)          AS adset,
+        LOWER(ad)             AS ad,
+        LOWER(channel)        AS channel,
+        MAX(original_cost)    AS cost,
+        MAX(impressions)      AS impressions,
+        MAX(clicks)           AS clicks,
+        MAX(installs)         AS installs
+    FROM cost_etl
+    WHERE DATE(TIMESTAMP(date)) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+    GROUP BY 1,2,3,4,5,6,7
+),
+mktg AS (
+    SELECT
+        date_tz,
+        CASE
+            WHEN source IS NULL                THEN 'null'
+            WHEN source LIKE '%googleadwords%' THEN 'google'
+            WHEN source LIKE '%facebook%'      THEN 'facebook'
+            WHEN source LIKE '%snapchat%'      THEN 'snapchat'
+            ELSE source
+        END AS source,
+        ROUND(SUM(cost))        AS total_cost,
+        ROUND(SUM(impressions)) AS impressions,
+        ROUND(SUM(clicks))      AS clicks,
+        ROUND(SUM(installs))    AS installs
+    FROM mktg_costs
+    GROUP BY 1,2
+    ORDER BY date_tz DESC, source DESC
+),
+aggregated AS (
+    SELECT
+        DATE(date_tz) AS date,
+        SUM(CASE WHEN source='google'   THEN total_cost ELSE 0 END) AS google_cost,
+        SUM(CASE WHEN source='facebook' THEN total_cost ELSE 0 END) AS facebook_cost,
+        SUM(CASE WHEN source='snapchat' THEN total_cost ELSE 0 END) AS snapchat_cost,
+        SUM(CASE WHEN source IN ('google','facebook','snapchat') THEN total_cost ELSE 0 END) AS total_cost,
+        SUM(CASE WHEN source='google'   THEN installs   ELSE 0 END) AS google_installs,
+        SUM(CASE WHEN source='facebook' THEN installs   ELSE 0 END) AS facebook_installs,
+        SUM(CASE WHEN source='snapchat' THEN installs   ELSE 0 END) AS snapchat_installs,
+        SUM(CASE WHEN source IN ('google','facebook','snapchat') THEN installs ELSE 0 END) AS total_installs,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source='facebook' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google','facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS facebook_pct_spend,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source='google'   THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google','facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS google_pct_spend,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source='snapchat' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google','facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS snapchat_pct_spend
+    FROM mktg
+    GROUP BY date_tz
+),
+
+-- NEW: profile_ids of users whose attributed AppsFlyer install was on a seekhomalayalam% campaign.
+vidhya_account_payers AS (
+    SELECT DISTINCT uai.profile_id
+    FROM `seekho-c084b.appsflyer.installs` i
+    JOIN `seekho-c084b.seekho.users_userappinfo` uai
+         ON i.`Advertising ID` = uai.advertising_id
+        AND uai.advertising_id NOT IN ('00000000-0000-0000-0000-000000000000','0000-0000')
+    WHERE DATE(i.`Install Time`,"Asia/Kolkata") >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND LOWER(i.campaign) LIKE 'seekhomalayalam%'
+),
+
+d0_data AS (
+    SELECT
+        DATE(pph.purchased_on, "Asia/Kolkata") AS Payment_date,
+        COUNT(DISTINCT CASE
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) = 0
+              THEN eo.profile_id END) AS D0,
+        COUNT(DISTINCT CASE
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) > 0
+              THEN eo.profile_id END) AS D0_Plus,
+        COUNT(DISTINCT CASE
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) >= 0
+              THEN eo.profile_id END) AS Total
+    FROM `seekho-c084b.seekho.experiments_order` AS eo
+    LEFT JOIN `seekho-c084b.seekho.experiments_profilepurchasehistory` AS pph ON eo.id = pph.order_id
+    LEFT JOIN `seekho-c084b.seekho.payments_subscriptionvalidity` AS ps        ON ps.purchase_record_id = pph.id
+    LEFT JOIN `seekho-c084b.seekho.users_userprofile` uup                      ON eo.profile_id = uup.user_ptr_id
+    WHERE eo.is_prod = TRUE
+      AND pph.is_prod = TRUE
+      AND eo.status = 'order_paid'
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND eo.premium_plan_id IS NOT NULL
+      AND CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE) >= '2025-01-01'
+      AND (
+            eo.order_source LIKE '%vidhya%'
+         OR eo.profile_id IN (SELECT profile_id FROM vidhya_account_payers)
+      )
+    GROUP BY DATE(pph.purchased_on, "Asia/Kolkata")
+),
+
+paid AS (
+    SELECT DISTINCT
+        DATE(pph.purchased_on,"Asia/Kolkata") AS payment_date,
+        eo.id,
+        eo.profile_id,
+        eo.pgw_amount
+    FROM `seekho-c084b.seekho.experiments_order` eo
+    LEFT JOIN `seekho-c084b.seekho.experiments_profilepurchasehistory` pph ON eo.id = pph.order_id
+    LEFT JOIN `seekho-c084b.seekho.payments_subscriptionvalidity`      sv  ON pph.id = sv.purchase_record_id
+    WHERE eo.status = 'order_paid'
+      AND eo.premium_item_id IS NULL
+      AND eo.is_prod = TRUE
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND DATE(pph.purchased_on, 'Asia/Kolkata') >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND DATE(pph.purchased_on, 'Asia/Kolkata') <  CURRENT_DATE("Asia/Kolkata")
+      AND (
+            eo.order_source LIKE '%vidhya%'
+         OR eo.profile_id IN (SELECT profile_id FROM vidhya_account_payers)
+      )
+),
+
+ad_id AS (
+    SELECT DISTINCT
+        profile_id,
+        advertising_id AS gaid,
+        DATE(MAX(created_on),"Asia/Kolkata") AS date_created
+    FROM `seekho-c084b.seekho.users_userappinfo`
+    GROUP BY 1,2
+),
+
+u_duf AS (
+    SELECT DATE(date_tz) AS date_tz, user_id
+    FROM `seekho-c084b.analytics_growth.s_daily_user_funnel`
+    WHERE date_tz >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND date_tz <  CURRENT_DATE("Asia/Kolkata")
+      AND active_user = 1
+    UNION DISTINCT
+    SELECT DATE(date_tz) AS date_tz, user_id
+    FROM `seekho-c084b.analytics_growth.s_daily_user_funnel_intraday`
+    WHERE date_tz >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 1 DAY)
+      AND date_tz <  CURRENT_DATE("Asia/Kolkata")
+      AND active_user = 1
+),
+
+ula AS (
+    SELECT *, DATE(`Install Time`,"Asia/Kolkata") AS date_tz
+    FROM `seekho-c084b.appsflyer.installs`
+    WHERE DATE(`Install Time`) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND `Advertising ID` <> '00000000-0000-0000-0000-000000000000'
+      AND `Advertising ID` <> '0000-0000'
+      AND (
+            `Bundle ID` LIKE '%vidhya%'
+         OR LOWER(campaign) LIKE 'seekhomalayalam%'
+      )
+),
+re AS (
+    SELECT DISTINCT
+        ula.date_tz AS date_tz,
+        firebase_uid AS user_id,
+        CASE
+             WHEN ula.`Media Source` IS NULL                  THEN 'null'
+             WHEN LOWER(`Media Source`) LIKE '%googleadwords%' THEN 'google'
+             WHEN LOWER(`Media Source`) LIKE '%facebook%'      THEN 'facebook'
+             WHEN LOWER(`Media Source`) LIKE '%snapchat%'      THEN 'snapchat'
+             ELSE LOWER(`Media Source`)
+        END AS source,
+        CASE
+             WHEN ula.campaign IS NULL THEN 'null'
+             ELSE LOWER(ula.campaign)
+        END AS campaign,
+        CASE
+             WHEN ula.Adset IS NULL                       THEN 'null'
+             WHEN LOWER(ula.campaign) LIKE '%female%'     THEN CONCAT(LOWER(ula.Adset), " - female")
+             ELSE LOWER(ula.Adset)
+        END AS ad_set,
+        paid.payment_date,
+        paid.pgw_amount
+    FROM ula
+    LEFT JOIN ad_id
+           ON ula.`Advertising ID` = ad_id.gaid
+          AND ad_id.gaid NOT IN ('00000000-0000-0000-0000-000000000000','0000-0000')
+    LEFT JOIN `seekho-c084b.seekho.users_userprofile` uup ON ad_id.profile_id = uup.user_ptr_id
+    LEFT JOIN paid                                         ON uup.user_ptr_id = paid.profile_id
+),
+
+act_u AS (
+    SELECT date_tz, source, COUNT(DISTINCT user_id) AS active_users
+    FROM re
+    WHERE LOWER(campaign) NOT LIKE '%resurrect%'
+      AND LOWER(campaign) NOT LIKE '%re-market%'
+      AND LOWER(campaign) NOT IN ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      AND LOWER(campaign) NOT LIKE '%reengagement%'
+    GROUP BY 1,2
+),
+
+f_act_u AS (
+    SELECT re.date_tz,
+        COUNT(DISTINCT CASE WHEN re.source='google'   THEN re.user_id END) AS google_active_users,
+        COUNT(DISTINCT CASE WHEN re.source='facebook' THEN re.user_id END) AS facebook_active_users,
+        COUNT(DISTINCT re.user_id)                                          AS total_active_users
+    FROM re
+    JOIN u_duf ON re.user_id = u_duf.user_id AND DATE_DIFF(re.date_tz, u_duf.date_tz, DAY) = 0
+    WHERE LOWER(campaign) NOT LIKE '%resurrect%'
+      AND LOWER(campaign) NOT LIKE '%re-market%'
+      AND LOWER(campaign) NOT IN ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      AND LOWER(campaign) NOT LIKE '%reengagement%'
+    GROUP BY 1
+),
+
+pay_u AS (
+    SELECT date_tz, source,
+        COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) =  0 THEN user_id END) AS D0_paid_users,
+        COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) >  0 THEN user_id END) AS D0_plus_paid_users,
+        COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) <= 7 THEN user_id END) AS W0_paid_users,
+        COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) <=30 THEN user_id END) AS M0_paid_users
+    FROM re
+    WHERE LOWER(campaign) NOT LIKE '%resurrect%'
+      AND LOWER(campaign) NOT LIKE '%re-market%'
+      AND LOWER(campaign) NOT IN ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      AND LOWER(campaign) NOT LIKE '%reengagement%'
+    GROUP BY 1,2
+),
+
+w0_count AS (
+    SELECT payment_date, COUNT(DISTINCT user_id) AS paid_users
+    FROM re
+    WHERE LOWER(campaign) NOT LIKE '%resurrect%'
+      AND LOWER(campaign) NOT LIKE '%re-market%'
+      AND LOWER(campaign) NOT IN ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      AND LOWER(campaign) NOT LIKE '%reengagement%'
+    GROUP BY 1
+),
+
+d0_paid_metrics AS (
+  SELECT
+    pu.date_tz AS date,
+    SUM(pu.D0_paid_users)                                            AS d0_orders,
+    SUM(pu.D0_plus_paid_users)                                       AS d0_plus_orders,
+    SUM(CASE WHEN pu.source='google'   THEN pu.D0_paid_users ELSE 0 END) AS google_d0_orders,
+    SUM(CASE WHEN pu.source='facebook' THEN pu.D0_paid_users ELSE 0 END) AS facebook_d0_orders,
+    SUM(CASE WHEN pu.source='snapchat' THEN pu.D0_paid_users ELSE 0 END) AS snapchat_d0_orders,
+    SUM(CASE WHEN m.source='google'    THEN m.total_cost     ELSE 0 END) AS google_total_cost,
+    SUM(CASE WHEN m.source='facebook'  THEN m.total_cost     ELSE 0 END) AS facebook_total_cost,
+    SUM(CASE WHEN m.source='snapchat'  THEN m.total_cost     ELSE 0 END) AS snapchat_total_cost
+  FROM pay_u pu
+  LEFT JOIN mktg m ON pu.date_tz = m.date_tz AND pu.source = m.source
+  GROUP BY 1
+)
+
+SELECT
+    DATE(a.date) AS date,
+    a.google_cost,
+    a.facebook_cost,
+    a.snapchat_cost,
+    a.total_cost,
+    a.google_pct_spend,
+    a.facebook_pct_spend,
+    a.snapchat_pct_spend,
+    p.D0_orders,
+    d.total - p.D0_orders                                       AS D0_plus_orders,
+    SAFE_DIVIDE(100*p.D0_orders, d.total)                       AS D0_orders_share,
+    SAFE_DIVIDE(100*(d.total - p.D0_orders), d.total)           AS D0_plus_orders_share,
+    d.total                                                     AS total_orders,
+    p.google_d0_orders,
+    p.facebook_d0_orders,
+    p.snapchat_d0_orders,
+    SAFE_DIVIDE(p.google_total_cost,   p.google_d0_orders)      AS google_D0_CAC,
+    SAFE_DIVIDE(p.facebook_total_cost, p.facebook_d0_orders)    AS facebook_D0_CAC,
+    SAFE_DIVIDE(p.snapchat_total_cost, p.snapchat_d0_orders)    AS snapchat_D0_CAC,
+    SAFE_DIVIDE(a.total_cost,          p.D0_orders)             AS D0_CAC,
+    SAFE_DIVIDE(a.total_cost,          d.total)                 AS total_CAC,
+    agg.google_installs,
+    agg.facebook_installs,
+    agg.snapchat_installs,
+    agg.total_installs,
+    SAFE_DIVIDE(a.google_cost,    agg.google_installs)          AS google_CPI,
+    SAFE_DIVIDE(a.facebook_cost,  agg.facebook_installs)        AS facebook_CPI,
+    SAFE_DIVIDE(a.snapchat_cost,  agg.snapchat_installs)        AS snapchat_CPI,
+    SAFE_DIVIDE(a.total_cost,     agg.total_installs)           AS total_CPI,
+
+    SAFE_DIVIDE(100*p.D0_orders,         agg.total_installs)    AS total_D0_conversion,
+    SAFE_DIVIDE(100*p.google_d0_orders,  agg.google_installs)   AS Google_D0_conversion,
+    SAFE_DIVIDE(100*p.facebook_d0_orders,agg.facebook_installs) AS Facebook_D0_conversion,
+
+    SAFE_DIVIDE(100*f.total_active_users,    agg.total_installs)   AS total_active_to_installs,
+    SAFE_DIVIDE(100*f.google_active_users,   agg.google_installs)  AS google_active_to_installs,
+    SAFE_DIVIDE(100*f.facebook_active_users, agg.facebook_installs) AS Facebook_active_to_installs,
+
+    SAFE_DIVIDE(100*p.D0_orders,          f.total_active_users)    AS total_paid_to_active,
+    SAFE_DIVIDE(100*p.google_d0_orders,   f.google_active_users)   AS google_paid_to_active,
+    SAFE_DIVIDE(100*p.facebook_d0_orders, f.facebook_active_users) AS Facebook_paid_to_active
+
+FROM aggregated a
+LEFT JOIN d0_data         d   ON DATE(a.date) = DATE(d.Payment_date)
+LEFT JOIN d0_paid_metrics p   ON DATE(a.date) = DATE(p.date)
+LEFT JOIN downloads_agg   agg ON DATE(a.date) = DATE(agg.date_tz)
+LEFT JOIN f_act_u         f   ON DATE(a.date) = DATE(f.date_tz)
+WHERE DATE(a.date) BETWEEN DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+                       AND DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 1 DAY)
+ORDER BY a.date DESC;
+
+kali 
+
+WITH cost_etl AS (
+    SELECT DISTINCT
+        date,
+        media_source,
+        app_id,
+        campaign,
+        adset,
+        ad_id AS ad,
+        channel,
+        original_cost,
+        impressions,
+        clicks,
+        installs
+    FROM `seekho-c084b.appsflyer.cost_etl`
+    WHERE TRUE
+      AND DATE(TIMESTAMP(date)) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      and lower(campaign) not like '%resurrect%'
+      and lower(campaign) not like '%re-market%'
+      and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      and lower(campaign) not like '%reengagement%'
+      and (app_id like '%kali%')
+),
+
+downloads as
+(
+select DATE(`Install Time`,"Asia/Kolkata") as date_tz,
+CASE 
+WHEN lower(`Media Source`) LIKE '%googleadwords%' THEN 'google'
+WHEN lower(`Media Source`) LIKE '%facebook%' THEN 'facebook'
+WHEN lower(`Media Source`) LIKE '%snapchat%' THEN 'snapchat'
+else 'facebook' 
+END AS source,
+count(distinct `Advertising ID`) as cnt
+FROM
+seekho-c084b.appsflyer.installs
+where `Bundle ID` like '%kali%'
+group by 1,2
+order by 1 desc
+),
+downloads_agg as
+(
+select date_tz,
+sum(case when source='google' then cnt else 0 end) as google_installs,
+sum(case when source='facebook' then cnt else 0 end) as facebook_installs,
+sum(case when source='snapchat' then cnt else 0 end) as snapchat_installs,
+sum(cnt) as total_installs
+from downloads
+group by 1
+),
+
+mktg_costs AS (
+    SELECT DISTINCT
+        DATE(TIMESTAMP(date)) AS date_tz,
+        LOWER(app_id) AS app_id,
+        LOWER(media_source) AS source,
+        LOWER(campaign) AS campaign,
+        LOWER(adset) AS adset,
+        LOWER(ad) AS ad,
+        LOWER(channel) AS channel,
+        MAX(original_cost) AS cost,
+        MAX(impressions) AS impressions,
+        MAX(clicks) AS clicks,
+        MAX(installs) AS installs
+    FROM cost_etl
+    WHERE TRUE
+      AND DATE(TIMESTAMP(date)) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+    GROUP BY 1,2,3,4,5,6,7
+),
+mktg AS (
+    SELECT 
+        date_tz,
+        CASE 
+            WHEN source IS NULL THEN 'null'
+            WHEN source LIKE '%googleadwords%' THEN 'google'
+            WHEN source LIKE '%facebook%' THEN 'facebook'
+            WHEN source LIKE '%snapchat%' THEN 'snapchat'
+            ELSE source 
+        END AS source,
+        ROUND(SUM(cost)) AS total_cost,
+        ROUND(SUM(impressions)) AS impressions,
+        ROUND(SUM(clicks)) AS clicks,
+        ROUND(SUM(installs)) AS installs
+    FROM mktg_costs
+    WHERE TRUE
+    GROUP BY 1,2
+    ORDER BY date_tz DESC, source DESC
+),
+aggregated AS (
+    SELECT 
+        date(date_tz) AS date,
+        SUM(CASE WHEN source = 'google' THEN total_cost ELSE 0 END) AS google_cost,
+        SUM(CASE WHEN source = 'facebook' THEN total_cost ELSE 0 END) AS facebook_cost,
+        SUM(CASE WHEN source = 'snapchat' THEN total_cost ELSE 0 END) AS snapchat_cost,
+        SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END) AS total_cost,
+        SUM(CASE WHEN source = 'google' THEN installs ELSE 0 END) AS google_installs,
+        SUM(CASE WHEN source = 'facebook' THEN installs ELSE 0 END) AS facebook_installs,
+        SUM(CASE WHEN source = 'snapchat' THEN installs ELSE 0 END) AS snapchat_installs,
+        SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN installs ELSE 0 END) AS total_installs,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source = 'facebook' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS facebook_pct_spend,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source = 'google' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS google_pct_spend,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source = 'snapchat' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS snapchat_pct_spend,      
+    FROM mktg
+    GROUP BY date_tz
+),
+
+
+-- CTE from your experiments_order query (D0 and D0_Plus)
+d0_data AS (
+    SELECT 
+        DATE(pph.purchased_on, "Asia/Kolkata") AS Payment_date,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) = 0 
+              THEN eo.profile_id END) AS D0,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) > 0 
+              THEN eo.profile_id END) AS D0_Plus,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) >= 0 
+              THEN eo.profile_id END) AS Total,
+    FROM seekho.experiments_order AS eo
+    LEFT JOIN seekho.experiments_profilepurchasehistory AS pph ON eo.id = pph.order_id
+    LEFT JOIN seekho.payments_subscriptionvalidity AS ps ON ps.purchase_record_id = pph.id
+    LEFT JOIN seekho.users_userprofile uup ON eo.profile_id = uup.user_ptr_id
+    WHERE eo.is_prod = TRUE 
+      AND pph.is_prod = TRUE
+      AND eo.status = 'order_paid'
+      AND (eo.order_source like '%kali%')
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND eo.premium_plan_id IS NOT NULL
+      AND CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE) >= '2025-01-01'
+    GROUP BY DATE(pph.purchased_on, "Asia/Kolkata")
+),
+
+
+-- CTEs from your attribution/engagement logic (used in pay_u)
+paid AS (
+    SELECT 
+        DISTINCT 
+        DATE(pph.purchased_on,"Asia/Kolkata") AS payment_date,
+        eo.id,
+        eo.profile_id,
+        pgw_amount
+    FROM seekho.experiments_order eo
+    LEFT JOIN seekho.experiments_profilepurchasehistory pph ON eo.id = pph.order_id 
+    LEFT JOIN `seekho-c084b.seekho.payments_subscriptionvalidity` sv ON pph.id = sv.purchase_record_id
+    WHERE TRUE
+      AND eo.status = 'order_paid'
+      AND eo.premium_item_id IS NULL 
+      AND eo.is_prod = TRUE
+	  AND (eo.order_source like '%kali%')
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND DATE(pph.purchased_on, 'Asia/Kolkata') >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND DATE(pph.purchased_on, 'Asia/Kolkata') < CURRENT_DATE("Asia/Kolkata")
+),
+ad_id AS (
+    SELECT DISTINCT 
+        profile_id,
+        advertising_id AS gaid,
+        DATE(MAX(created_on),"Asia/Kolkata") AS date_created
+    FROM `seekho-c084b.seekho.users_userappinfo`
+    WHERE TRUE
+    GROUP BY 1,2
+),
+
+u_duf AS (
+    SELECT date(date_tz) as date_tz, user_id
+    FROM analytics_growth.s_daily_user_funnel
+    WHERE date_tz >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND date_tz < CURRENT_DATE("Asia/Kolkata")
+      and active_user=1
+    UNION DISTINCT
+    SELECT date(date_tz) as date_tz, user_id
+    FROM analytics_growth.s_daily_user_funnel_intraday
+    WHERE date_tz >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 1 DAY)
+      AND date_tz < CURRENT_DATE("Asia/Kolkata")
+      and active_user=1
+),
+
+ula AS (
+    SELECT *, DATE(`Install Time`,"Asia/Kolkata") as date_tz
+    FROM seekho-c084b.appsflyer.installs
+    WHERE DATE(`Install Time`) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND `Advertising ID` <> '00000000-0000-0000-0000-000000000000'
+      AND `Advertising ID` <> '0000-0000'
+      and (`Bundle ID` like '%kali%')
+),
+re AS (
+    SELECT DISTINCT
+        ula.date_tz AS date_tz,
+        firebase_uid AS user_id,
+        CASE 
+             WHEN ula.`Media Source` IS NULL THEN 'null'
+             WHEN LOWER(`Media Source`) LIKE '%googleadwords%' THEN 'google'
+             WHEN LOWER(`Media Source`) LIKE '%facebook%' THEN 'facebook'
+             WHEN LOWER(`Media Source`) LIKE '%snapchat%' THEN 'snapchat'
+             ELSE LOWER(`Media Source`)
+        END AS source,
+        CASE 
+             WHEN ula.campaign IS NULL THEN 'null'
+             ELSE LOWER(ula.campaign)
+        END AS campaign,
+        CASE 
+             WHEN ula.Adset IS NULL THEN 'null'
+             WHEN LOWER(ula.campaign) LIKE '%female%' THEN CONCAT(LOWER(ula.Adset), " - female")
+             ELSE LOWER(ula.Adset)
+        END AS ad_set,
+        paid.payment_date,
+        paid.pgw_amount
+    FROM ula
+    LEFT JOIN ad_id ON ula.`Advertising ID` = ad_id.gaid AND ad_id.gaid NOT IN ('00000000-0000-0000-0000-000000000000', '0000-0000')
+    LEFT JOIN seekho.users_userprofile uup ON ad_id.profile_id = uup.user_ptr_id 
+    LEFT JOIN paid ON uup.user_ptr_id = paid.profile_id
+    WHERE TRUE
+),
+act_u AS (
+    SELECT date_tz,
+           source,
+           COUNT(DISTINCT user_id) AS active_users
+    FROM re
+    WHERE TRUE
+    and lower(campaign) not like '%resurrect%'
+    and lower(campaign) not like '%re-market%'
+    and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+    and lower(campaign) not like '%reengagement%'
+    GROUP BY 1,2
+),
+
+f_act_u AS (
+    SELECT re.date_tz,
+    count(distinct case when re.source = 'google' THEN re.user_id else null end) as google_active_users,
+    count(distinct case when re.source = 'facebook' THEN re.user_id else null end) as facebook_active_users,
+    COUNT(DISTINCT re.user_id) AS total_active_users
+    FROM re
+    join u_duf on re.user_id= u_duf.user_id and date_diff(re.date_tz,u_duf.date_tz,day)=0
+    WHERE TRUE
+    and lower(campaign) not like '%resurrect%'
+    and lower(campaign) not like '%re-market%'
+    and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+    and lower(campaign) not like '%reengagement%'
+    GROUP BY 1
+),
+pay_u AS (
+    SELECT date_tz,
+           source,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) = 0 THEN user_id ELSE NULL END) AS D0_paid_users,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) > 0 THEN user_id ELSE NULL END) AS D0_plus_paid_users,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) <= 7 THEN user_id ELSE NULL END) AS W0_paid_users,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) <= 30 THEN user_id ELSE NULL END) AS M0_paid_users,
+    FROM re
+    WHERE TRUE
+    and lower(campaign) not like '%resurrect%'
+    and lower(campaign) not like '%re-market%'
+    and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+    and lower(campaign) not like '%reengagement%'
+    GROUP BY 1,2
+),
+
+w0_count as (
+    select
+        payment_date
+        , count(distinct user_id) as paid_users
+    from re
+    WHERE lower(campaign) not like '%resurrect%'
+      and lower(campaign) not like '%re-market%'
+      and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      and lower(campaign) not like '%reengagement%'
+
+    GROUP BY 1
+),
+
+
+d0_paid_metrics AS (
+  SELECT 
+    pu.date_tz AS date,
+    SUM(pu.D0_paid_users) AS d0_orders,
+    SUM(pu.D0_plus_paid_users) AS d0_plus_orders,
+    SUM(CASE WHEN pu.source = 'google' THEN pu.D0_paid_users ELSE 0 END) AS google_d0_orders,
+    SUM(CASE WHEN pu.source = 'facebook' THEN pu.D0_paid_users ELSE 0 END) AS facebook_d0_orders,
+    SUM(CASE WHEN pu.source = 'snapchat' THEN pu.D0_paid_users ELSE 0 END) AS snapchat_d0_orders,
+    SUM(CASE WHEN m.source = 'google' THEN m.total_cost ELSE 0 END) AS google_total_cost,
+    SUM(CASE WHEN m.source = 'facebook' THEN m.total_cost ELSE 0 END) AS facebook_total_cost,
+    SUM(CASE WHEN m.source = 'snapchat' THEN m.total_cost ELSE 0 END) AS snapchat_total_cost
+    
+  FROM pay_u pu
+  LEFT JOIN mktg m ON pu.date_tz = m.date_tz AND pu.source = m.source
+  GROUP BY 1
+)
+
+SELECT 
+    date(a.date) as date,
+    a.google_cost,
+    a.facebook_cost,
+    a.snapchat_cost,
+    a.total_cost,
+    a.google_pct_spend,
+    a.facebook_pct_spend,
+    a.snapchat_pct_spend,
+    p.D0_orders,
+    d.total-p.D0_orders as D0_plus_orders,
+    SAFE_DIVIDE(100*p.D0_orders,d.total) as D0_orders_share,
+    SAFE_DIVIDE(100*(d.total-p.D0_orders),d.total) as D0_plus_orders_share,
+    d.total as total_orders,
+    p.google_d0_orders,
+    p.facebook_d0_orders,
+    p.snapchat_d0_orders,
+    SAFE_DIVIDE(p.google_total_cost, p.google_d0_orders) AS google_D0_CAC,
+    SAFE_DIVIDE(p.facebook_total_cost, p.facebook_d0_orders) AS facebook_D0_CAC,
+    SAFE_DIVIDE(p.snapchat_total_cost, p.snapchat_d0_orders) AS snapchat_D0_CAC,
+    SAFE_DIVIDE(a.total_cost, p.D0_orders) AS D0_CAC,
+    SAFE_DIVIDE(a.total_cost, d.total) AS total_CAC,
+    agg.google_installs,
+    agg.facebook_installs,
+    agg.snapchat_installs,
+    agg.total_installs,
+    SAFE_DIVIDE(a.google_cost, agg.google_installs) AS google_CPI,
+    SAFE_DIVIDE(a.facebook_cost, agg.facebook_installs) AS facebook_CPI,
+    SAFE_DIVIDE(a.snapchat_cost, agg.snapchat_installs) AS snapchat_CPI,
+    SAFE_DIVIDE(a.total_cost, agg.total_installs) AS total_CPI,
+    
+	SAFE_DIVIDE(100*p.D0_orders, agg.total_installs) AS total_D0_conversion,
+	SAFE_DIVIDE(100*p.google_d0_orders, agg.google_installs) AS Google_D0_conversion,
+	SAFE_DIVIDE(100*p.facebook_d0_orders, agg.facebook_installs) AS Facebook_D0_conversion,
+
+    SAFE_DIVIDE(100*f.total_active_users, agg.total_installs) AS total_active_to_installs,
+	SAFE_DIVIDE(100*f.google_active_users, agg.google_installs) AS google_active_to_installs,
+	SAFE_DIVIDE(100*f.facebook_active_users, agg.facebook_installs) AS Facebook_active_to_installs,
+
+    SAFE_DIVIDE(100*p.D0_orders,f.total_active_users) AS total_paid_to_active,
+	SAFE_DIVIDE(100*p.google_d0_orders, f.google_active_users) AS google_paid_to_active,
+	SAFE_DIVIDE(100*p.facebook_d0_orders, f.facebook_active_users) AS Facebook_paid_to_active
+
+FROM aggregated a
+LEFT JOIN d0_data d ON date(a.date) = date(d.Payment_date)
+LEFT JOIN d0_paid_metrics p ON date(a.date) = date(p.date)
+left join downloads_agg agg on date(a.date)=date(agg.date_tz)
+left join f_act_u f on date(a.date) = date(f.date_tz)
+where date(a.date) between DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY) and DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 1 DAY)
+-- and extract(day from date(a.date)) != 31
+ORDER BY a.date DESC
+
+overall
+
+WITH moloco_metrics as
+(
+WITH cost_etl AS (
+    SELECT DISTINCT
+        DATE(TIMESTAMP(date), "Asia/Kolkata") AS date_tz,
+        media_source,
+        app_id,
+        campaign,
+        ad_id AS ad,
+        original_cost,
+        installs
+    FROM `seekho-c084b.appsflyer.cost_etl`
+    WHERE TRUE
+    AND DATE(TIMESTAMP(date)) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 90 DAY)
+    and (app_id IN ('android','com.seekho.android','ios','com.seekho.ios','web','com.seekho.web')
+    OR app_id IS NULL)
+),
+
+mktg AS (
+    SELECT DISTINCT
+        date_tz,
+        media_source AS source,
+        SUM(case when date_tz between date'2025-09-01' and date'2025-12-31' then original_cost else 0 end) AS cost,
+        SUM(case when date_tz between date'2025-09-01' and date'2025-12-31' then installs else 0 end) AS installs
+    FROM cost_etl
+    WHERE date_tz > "2025-09-01"
+      AND media_source = "moloco_int"
+    GROUP BY 1,2
+    ORDER BY 1
+),
+
+downloads AS (
+    SELECT 
+        DATE(`Install Time`,'Asia/Kolkata') as date_tz,
+        CASE 
+            WHEN lower(`Media Source`) LIKE '%moloco%' THEN 'moloco'
+            ELSE 'other'
+        END AS source,
+        COUNT(DISTINCT `Advertising ID`) AS cnt
+    FROM seekho-c084b.appsflyer.installs
+    WHERE `Bundle ID` IN ('android','com.seekho.android','ios','com.seekho.ios','web','com.seekho.web')
+       OR `Bundle ID` IS NULL
+    GROUP BY 1,2
+    ORDER BY 1 DESC
+),
+
+downloads_agg AS (
+    SELECT 
+        date_tz,
+        SUM(CASE WHEN source='moloco' THEN cnt ELSE 0 END) AS moloco_installs
+    FROM downloads
+    GROUP BY 1
+),
+
+aggregated AS (
+    SELECT 
+        DATE(date_tz) AS date,
+        SUM(CASE WHEN source LIKE '%moloco%' THEN cost ELSE 0 END) AS moloco_cost,
+        SUM(CASE WHEN source LIKE '%moloco%' THEN installs ELSE 0 END) AS moloco_installs
+    FROM mktg
+    GROUP BY date_tz
+)
+
+SELECT 
+    DATE(a.date) AS date_tz,
+    88*a.moloco_cost as moloco_cost, moloco_installs
+   
+FROM aggregated a
+ORDER BY a.date DESC
+)
+
+, cost_etl AS (
+    SELECT DISTINCT
+        date,
+        media_source,
+        app_id,
+        campaign,
+        adset,
+        ad_id AS ad,
+        channel,
+        original_cost,
+        impressions,
+        clicks,
+        installs
+    FROM `seekho-c084b.appsflyer.cost_etl`
+    WHERE TRUE
+      AND DATE(TIMESTAMP(date)) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 90 DAY)
+      and lower(campaign) not like '%resurrect%'
+      and lower(campaign) not like '%re-market%'
+      and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      and lower(campaign) not like '%reengagement%'
+      and lower(campaign) not like '%sab_%'
+      and lower(campaign) not like '%gtm%'
+      and lower(campaign) not in ('health scaling abo campaign')
+      and lower(adset) not like '%gtm%'
+      and campaign is not null
+      and adset is not null
+      and trim(campaign) <> ""
+      and trim(adset) <> ""
+      and (app_id not in ('com.seekhoglobal.android', 'com.seekhoai.android','com.seekhojunior.android','com.bolo.androie','com.bolo.android') or app_id is null)
+),
+
+downloads as
+(
+select DATE(`Install Time`, 'Asia/Kolkata') as date_tz,
+CASE 
+WHEN lower(`Media Source`) LIKE '%googleadwords%' THEN 'google'
+WHEN lower(`Media Source`) LIKE '%facebook%' THEN 'facebook'
+WHEN lower(`Media Source`) LIKE '%snapchat%' THEN 'snapchat'
+else 'null' 
+END AS source,
+count(distinct `Advertising ID`) as cnt
+FROM
+seekho-c084b.appsflyer.installs
+where (`Bundle ID` not in ('com.seekhoglobal.android', 'com.seekhoai.android','com.seekhojunior.android','com.bolo.androie','com.bolo.android') or `Bundle ID` is null)
+group by 1,2
+order by 1 desc
+),
+downloads_agg as
+(
+select date_tz,
+sum(case when source='google' then cnt else 0 end) as google_installs,
+sum(case when source='facebook' then cnt else 0 end) as facebook_installs,
+sum(case when source='snapchat' then cnt else 0 end) as snapchat_installs,
+sum(cnt) as total_installs
+from downloads
+group by 1
+),
+
+mktg_costs AS (
+    SELECT DISTINCT
+        DATE(TIMESTAMP(date)) AS date_tz,
+        LOWER(app_id) AS app_id,
+        LOWER(media_source) AS source,
+        LOWER(campaign) AS campaign,
+        LOWER(adset) AS adset,
+        LOWER(ad) AS ad,
+        LOWER(channel) AS channel,
+        MAX(original_cost) AS cost,
+        MAX(impressions) AS impressions,
+        MAX(clicks) AS clicks,
+        MAX(installs) AS installs
+    FROM cost_etl
+    WHERE TRUE
+      AND DATE(TIMESTAMP(date)) >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 90 DAY)
+    GROUP BY 1,2,3,4,5,6,7
+),
+mktg AS (
+    SELECT 
+        date_tz,
+        CASE 
+            WHEN source IS NULL THEN 'null'
+            WHEN source LIKE '%googleadwords%' THEN 'google'
+            WHEN source LIKE '%facebook%' THEN 'facebook'
+            WHEN source LIKE '%snapchat%' THEN 'snapchat'
+            ELSE source 
+        END AS source,
+        ROUND(SUM(cost)) AS total_cost,
+        ROUND(SUM(impressions)) AS impressions,
+        ROUND(SUM(clicks)) AS clicks,
+        ROUND(SUM(installs)) AS installs
+    FROM mktg_costs
+    WHERE TRUE
+    GROUP BY 1,2
+    ORDER BY date_tz DESC, source DESC
+),
+aggregated AS (
+    SELECT 
+        date(date_tz) AS date,
+        SUM(CASE WHEN source = 'google' THEN total_cost ELSE 0 END) AS google_cost,
+        SUM(CASE WHEN source = 'facebook' THEN total_cost ELSE 0 END) AS facebook_cost,
+        SUM(CASE WHEN source = 'snapchat' THEN total_cost ELSE 0 END) AS snapchat_cost,
+        SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END) AS total_cost,
+        SUM(CASE WHEN source = 'google' THEN installs ELSE 0 END) AS google_installs,
+        SUM(CASE WHEN source = 'facebook' THEN installs ELSE 0 END) AS facebook_installs,
+        SUM(CASE WHEN source = 'snapchat' THEN installs ELSE 0 END) AS snapchat_installs,
+        SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN installs ELSE 0 END) AS total_installs,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source = 'facebook' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS facebook_pct_spend,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source = 'google' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS google_pct_spend,
+        CONCAT(CAST(ROUND(100.0 * SUM(CASE WHEN source = 'snapchat' THEN total_cost ELSE 0 END) /
+              NULLIF(SUM(CASE WHEN source IN ('google', 'facebook','snapchat') THEN total_cost ELSE 0 END),0), 2) AS STRING), '%') AS snapchat_pct_spend,      
+    FROM mktg
+    GROUP BY date_tz
+),
+
+-- CTEs from your attribution/engagement logic (used in pay_u)
+paid AS (
+    SELECT 
+        DISTINCT 
+        DATE(pph.purchased_on, 'Asia/Kolkata') AS payment_date,
+        eo.id,
+        eo.profile_id,
+        pgw_amount
+    FROM seekho.experiments_order eo
+    LEFT JOIN seekho.experiments_profilepurchasehistory pph ON eo.id = pph.order_id 
+    LEFT JOIN `seekho-c084b.seekho.payments_subscriptionvalidity` sv ON pph.id = sv.purchase_record_id
+    WHERE TRUE
+      AND eo.status = 'order_paid'
+      AND eo.premium_item_id IS NULL 
+      AND eo.is_prod = TRUE
+	  AND (eo.order_source not in ('com.seekhoglobal.android', 'com.seekhoai.android','com.seekhojunior.android','com.bolo.androie','com.bolo.android') or eo.order_source is null)
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND DATE(pph.purchased_on, 'Asia/Kolkata') >= DATE_SUB(CURRENT_DATE('Asia/Kolkata'), INTERVAL 90 DAY)
+      AND DATE(pph.purchased_on, 'Asia/Kolkata') < CURRENT_DATE('Asia/Kolkata')
+),
+ad_id AS (
+    SELECT DISTINCT 
+        profile_id,
+        advertising_id AS gaid,
+        DATE(MAX(date(created_on, 'Asia/Kolkata'))) AS date_created
+    FROM `seekho-c084b.seekho.users_userappinfo`
+    WHERE TRUE
+    GROUP BY 1,2
+),
+
+u_duf AS (
+    SELECT date(date_tz) as date_tz, user_id
+    FROM analytics_growth.s_daily_user_funnel
+    WHERE date_tz >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 90 DAY)
+      AND date_tz < CURRENT_DATE("Asia/Kolkata")
+      and active_user=1
+    UNION DISTINCT
+    SELECT date(date_tz) as date_tz, user_id
+    FROM analytics_growth.s_daily_user_funnel_intraday
+    WHERE date_tz >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 1 DAY)
+      AND date_tz < CURRENT_DATE("Asia/Kolkata")
+      and active_user=1
+),
+
+ula AS (
+    SELECT *, DATE(`Install Time`, 'Asia/Kolkata') as date_tz
+    FROM seekho-c084b.appsflyer.installs
+    WHERE DATE(`Install Time`, 'Asia/Kolkata') >= DATE_SUB(CURRENT_DATE('Asia/Kolkata'), INTERVAL 90 DAY)
+      AND `Advertising ID` <> '00000000-0000-0000-0000-000000000000'
+      AND `Advertising ID` <> '0000-0000'
+      and (`Bundle ID` not in ('com.seekhoglobal.android', 'com.seekhoai.android','com.seekhojunior.android','com.bolo.androie','com.bolo.android') or `Bundle ID` is null) 
+),
+re AS (
+    SELECT DISTINCT
+        ula.date_tz AS date_tz,
+        firebase_uid AS user_id,
+        uup.user_ptr_id as profile_id,
+        CASE 
+             WHEN ula.`Media Source` IS NULL THEN 'null'
+             WHEN LOWER(`Media Source`) LIKE '%googleadwords%' THEN 'google'
+             WHEN LOWER(`Media Source`) LIKE '%facebook%' THEN 'facebook'
+             WHEN LOWER(`Media Source`) LIKE '%snapchat%' THEN 'snapchat'
+             ELSE LOWER(`Media Source`)
+        END AS source,
+        CASE 
+             WHEN ula.campaign IS NULL THEN 'null'
+             ELSE LOWER(ula.campaign)
+        END AS campaign,
+        CASE 
+             WHEN ula.Adset IS NULL THEN 'null'
+             WHEN LOWER(ula.campaign) LIKE '%female%' THEN CONCAT(LOWER(ula.Adset), " - female")
+             ELSE LOWER(ula.Adset)
+        END AS ad_set,
+        paid.payment_date,
+        paid.pgw_amount
+    FROM ula
+    LEFT JOIN ad_id ON ula.`Advertising ID` = ad_id.gaid AND ad_id.gaid NOT IN ('00000000-0000-0000-0000-000000000000', '0000-0000')
+    LEFT JOIN seekho.users_userprofile uup ON ad_id.profile_id = uup.user_ptr_id 
+    LEFT JOIN paid ON uup.user_ptr_id = paid.profile_id
+    WHERE TRUE
+),
+
+-- CTE from your experiments_order query (D0 and D0_Plus)
+pre_d0_data AS (
+    SELECT 
+        DATE(pph.purchased_on, "Asia/Kolkata") AS Payment_date,
+        
+        (CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) >= 0 
+              THEN eo.profile_id END) AS Total,
+    FROM seekho.experiments_order AS eo
+    LEFT JOIN seekho.experiments_profilepurchasehistory AS pph ON eo.id = pph.order_id
+    LEFT JOIN seekho.payments_subscriptionvalidity AS ps ON ps.purchase_record_id = pph.id
+    LEFT JOIN seekho.users_userprofile uup ON eo.profile_id = uup.user_ptr_id
+    WHERE eo.is_prod = TRUE 
+      AND pph.is_prod = TRUE
+      AND eo.status = 'order_paid'
+      AND (eo.order_source not in ('com.seekhoglobal.android', 'com.seekhoai.android','com.seekhojunior.android','com.bolo.androie','com.bolo.android') or eo.order_source is null)
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND eo.premium_plan_id IS NOT NULL
+      AND CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE) >= '2025-01-01'
+),
+
+d0_data as (
+  select
+    a.Payment_date,
+    count(distinct a.total) as total
+  from pre_d0_data a
+  where not exists 
+  (
+    select 1
+    from re b
+    where a.total = b.profile_id
+      and (lower(b.campaign) like '%gtm%'
+      or lower(b.campaign) in ('health scaling abo campaign')
+      or lower(b.ad_set) like '%gtm%'
+   )
+  )
+  group by 1
+),
+
+act_u AS (
+    SELECT date_tz,
+           source,
+           COUNT(DISTINCT user_id) AS active_users
+    FROM re
+    WHERE TRUE
+    and lower(campaign) not like '%resurrect%'
+    and lower(campaign) not like '%re-market%'
+    and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+    and lower(campaign) not like '%reengagement%'
+    and lower(campaign) not like '%sab_%'
+    and lower(campaign) not like '%gtm%'
+    and lower(ad_set) not like '%gtm%'
+    and lower(campaign) not in ('health scaling abo campaign')
+    GROUP BY 1,2
+),
+
+f_act_u AS (
+    SELECT re.date_tz,
+    count(distinct case when re.source = 'google' THEN re.user_id else null end) as google_active_users,
+    count(distinct case when re.source = 'facebook' THEN re.user_id else null end) as facebook_active_users,
+    COUNT(DISTINCT re.user_id) AS total_active_users
+    FROM re
+    join u_duf on re.user_id= u_duf.user_id and date_diff(re.date_tz,u_duf.date_tz,day)=0
+    WHERE TRUE
+    and lower(campaign) not like '%resurrect%'
+    and lower(campaign) not like '%re-market%'
+    and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+    and lower(campaign) not like '%reengagement%'
+    and lower(campaign) not like '%sab_%'
+    and lower(campaign) not like '%gtm%'
+    and lower(ad_set) not like '%gtm%'
+    and lower(campaign) not in ('health scaling abo campaign')
+    GROUP BY 1
+),
+pay_u AS (
+    SELECT date_tz,
+           source,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) = 0 THEN user_id ELSE NULL END) AS D0_paid_users,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) > 0 THEN user_id ELSE NULL END) AS D0_plus_paid_users,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) <= 7 THEN user_id ELSE NULL END) AS W0_paid_users,
+           COUNT(DISTINCT CASE WHEN DATE_DIFF(payment_date, date_tz, DAY) <= 30 THEN user_id ELSE NULL END) AS M0_paid_users,
+    FROM re
+    WHERE TRUE
+    and lower(campaign) not like '%resurrect%'
+    and lower(campaign) not like '%re-market%'
+    and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+    and lower(campaign) not like '%reengagement%'
+    and lower(campaign) not like '%sab_%'
+    and lower(campaign) not like '%gtm%'
+    and lower(ad_set) not like '%gtm%'
+    and lower(campaign) not in ('health scaling abo campaign')
+    GROUP BY 1,2
+),
+
+w0_count as (
+    select
+        payment_date
+        , count(distinct user_id) as paid_users
+    from re
+    where lower(campaign) not like '%resurrect%'
+      and lower(campaign) not like '%re-market%'
+      and lower(campaign) not in ('annual+monthly renewal remarketing - december','new categories installs campaign - 16dec')
+      and lower(campaign) not like '%reengagement%'
+      and lower(campaign) not like '%sab_%'
+      and lower(campaign) not like '%gtm%'
+      and lower(ad_set) not like '%gtm%'
+      and lower(campaign) not in ('health scaling abo campaign')
+    GROUP BY 1
+),
+
+
+d0_paid_metrics AS (
+  SELECT 
+    pu.date_tz AS date,
+    SUM(pu.D0_paid_users) AS d0_orders,
+    SUM(pu.D0_plus_paid_users) AS d0_plus_orders,
+    SUM(CASE WHEN pu.source = 'google' THEN pu.D0_paid_users ELSE 0 END) AS google_d0_orders,
+    SUM(CASE WHEN pu.source = 'facebook' THEN pu.D0_paid_users ELSE 0 END) AS facebook_d0_orders,
+    SUM(CASE WHEN pu.source = 'snapchat' THEN pu.D0_paid_users ELSE 0 END) AS snapchat_d0_orders,
+    SUM(CASE WHEN m.source = 'google' THEN m.total_cost ELSE 0 END) AS google_total_cost,
+    SUM(CASE WHEN m.source = 'facebook' THEN m.total_cost ELSE 0 END) AS facebook_total_cost,
+    SUM(CASE WHEN m.source = 'snapchat' THEN m.total_cost ELSE 0 END) AS snapchat_total_cost
+    
+  FROM pay_u pu
+  LEFT JOIN mktg m ON pu.date_tz = m.date_tz AND pu.source = m.source
+  GROUP BY 1
+)
+
+SELECT 
+    date(a.date) as date,
+    a.google_cost,
+    a.facebook_cost,
+    a.snapchat_cost,
+    round(coalesce(m.moloco_cost,0)) as moloco_cost,
+    ROUND(a.total_cost+coalesce(m.moloco_cost,0)) as total_cost,
+    SAFE_DIVIDE(100*a.google_cost, a.total_cost+coalesce(m.moloco_cost,0)) as google_pct_spend,
+    SAFE_DIVIDE(100*a.facebook_cost, a.total_cost+coalesce(m.moloco_cost,0)) as facebook_pct_spend,
+    SAFE_DIVIDE(100*a.snapchat_cost, a.total_cost+coalesce(m.moloco_cost,0)) as snapchat_pct_spend,
+    SAFE_DIVIDE(100*coalesce(m.moloco_cost,0), a.total_cost+coalesce(m.moloco_cost,0)) as moloco_pct_spend,
+    p.D0_orders,
+    d.total-p.D0_orders as D0_plus_orders,
+    SAFE_DIVIDE(100*p.D0_orders,d.total) as D0_orders_share,
+    SAFE_DIVIDE(100*(d.total-p.D0_orders),d.total) as D0_plus_orders_share,
+    d.total as total_orders,
+    p.google_d0_orders,
+    p.facebook_d0_orders,
+    p.snapchat_d0_orders,
+    SAFE_DIVIDE(p.google_total_cost, p.google_d0_orders) AS google_D0_CAC,
+    SAFE_DIVIDE(p.facebook_total_cost, p.facebook_d0_orders) AS facebook_D0_CAC,
+    SAFE_DIVIDE(p.snapchat_total_cost, p.snapchat_d0_orders) AS snapchat_D0_CAC,
+    SAFE_DIVIDE(a.total_cost+coalesce(m.moloco_cost,0), p.D0_orders) AS D0_CAC,
+    SAFE_DIVIDE(a.total_cost+coalesce(m.moloco_cost,0), d.total) AS total_CAC,
+    agg.google_installs,
+    agg.facebook_installs,
+    agg.snapchat_installs,
+    agg.total_installs+coalesce(m.moloco_installs,0) as total_installs,
+    SAFE_DIVIDE(a.google_cost, agg.google_installs) AS google_CPI,
+    SAFE_DIVIDE(a.facebook_cost, agg.facebook_installs) AS facebook_CPI,
+    SAFE_DIVIDE(a.snapchat_cost, agg.snapchat_installs) AS snapchat_CPI,
+    SAFE_DIVIDE(a.total_cost+coalesce(m.moloco_cost,0), agg.total_installs+coalesce(m.moloco_installs,0)) AS total_CPI,
+    
+	SAFE_DIVIDE(100*p.D0_orders, agg.total_installs+coalesce(m.moloco_installs,0)) AS total_D0_conversion,
+	SAFE_DIVIDE(100*p.google_d0_orders, agg.google_installs) AS Google_D0_conversion,
+	SAFE_DIVIDE(100*p.facebook_d0_orders, agg.facebook_installs) AS Facebook_D0_conversion,
+
+    SAFE_DIVIDE(100*f.total_active_users, agg.total_installs+coalesce(m.moloco_installs,0)) AS total_active_to_installs,
+	SAFE_DIVIDE(100*f.google_active_users, agg.google_installs) AS google_active_to_installs,
+	SAFE_DIVIDE(100*f.facebook_active_users, agg.facebook_installs) AS Facebook_active_to_installs,
+
+    SAFE_DIVIDE(100*p.D0_orders,f.total_active_users) AS total_paid_to_active,
+	SAFE_DIVIDE(100*p.google_d0_orders, f.google_active_users) AS google_paid_to_active,
+	SAFE_DIVIDE(100*p.facebook_d0_orders, f.facebook_active_users) AS Facebook_paid_to_active,
+	sum(a.total_cost+coalesce(m.moloco_cost,0)) over (partition by extract(month from a.date),extract(year from a.date) order by a.date rows between unbounded preceding and current row) as MTD_spends,
+    sum(d.total) over (partition by extract(month from a.date),extract(year from a.date) order by a.date rows between unbounded preceding and current row) as MTD_orders,
+
+    safe_divide(sum(a.total_cost+coalesce(m.moloco_cost,0)) over (partition by extract(month from a.date),extract(year from a.date) order by a.date rows between unbounded preceding and current row),
+                sum(d.total) over (partition by extract(month from a.date),extract(year from a.date) order by a.date rows between unbounded preceding and current row)
+               ) as MTD_CAC
+
+FROM aggregated a
+LEFT JOIN d0_data d ON date(a.date) = date(d.Payment_date)
+LEFT JOIN d0_paid_metrics p ON date(a.date) = date(p.date)
+left join downloads_agg agg on date(a.date)=date(agg.date_tz)
+left join f_act_u f on date(a.date) = date(f.date_tz)
+left join moloco_metrics m on date(a.date) = date(m.date_tz)
+where date(a.date) between DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 90 DAY) and DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 1 DAY)
+-- and extract(day from date(a.date)) != 31
+ORDER BY a.date DESC

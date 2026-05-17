@@ -1,0 +1,389 @@
+WITH
+
+vidhya_account_payers AS (
+    SELECT DISTINCT uai.profile_id
+    FROM `seekho-c084b.appsflyer.installs` i
+    JOIN `seekho-c084b.seekho.users_userappinfo` uai
+         ON i.`Advertising ID` = uai.advertising_id
+        AND uai.advertising_id NOT IN ('00000000-0000-0000-0000-000000000000','0000-0000')
+    WHERE DATE(i.`Install Time`,"Asia/Kolkata") >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND LOWER(i.campaign) LIKE 'seekhomalayalam%'
+),
+
+seekho_paid AS (
+    SELECT DISTINCT
+        DATE(pph.purchased_on,"Asia/Kolkata") AS payment_date,
+        eo.id,
+        eo.profile_id,
+        eo.pgw_amount
+    FROM `seekho-c084b.seekho.experiments_order` eo
+    LEFT JOIN `seekho-c084b.seekho.experiments_profilepurchasehistory` pph ON eo.id = pph.order_id
+    LEFT JOIN `seekho-c084b.seekho.payments_subscriptionvalidity`      sv  ON pph.id = sv.purchase_record_id
+    WHERE eo.status = 'order_paid'
+      AND eo.premium_item_id IS NULL
+      AND eo.is_prod = TRUE
+      AND ( eo.order_source IN ('android','com.seekho.android','ios','com.seekho.ios','web','com.seekho.web')
+            OR eo.order_source IS NULL )
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND DATE(pph.purchased_on,"Asia/Kolkata") >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND DATE(pph.purchased_on,"Asia/Kolkata") <  CURRENT_DATE("Asia/Kolkata")
+      AND eo.profile_id NOT IN (SELECT profile_id FROM vidhya_account_payers)
+),
+seekho_ad_id AS (
+    SELECT DISTINCT
+        profile_id,
+        advertising_id AS gaid,
+        DATE(MAX(created_on),"Asia/Kolkata") AS date_created
+    FROM `seekho-c084b.seekho.users_userappinfo`
+    GROUP BY 1,2
+),
+seekho_ula AS (
+    SELECT *, DATE(`Install Time`,"Asia/Kolkata") AS date_tz
+    FROM `seekho-c084b.appsflyer.installs`
+    WHERE DATE(`Install Time`,"Asia/Kolkata") >= DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY)
+      AND `Advertising ID` <> '00000000-0000-0000-0000-000000000000'
+      AND `Advertising ID` <> '0000-0000'
+      AND ( `Bundle ID` IN ('android','com.seekho.android','ios','com.seekho.ios',
+                            'web','com.seekho.web','com.seekho.androie','com.seekho.android.preprod')
+            OR `Bundle ID` IS NULL )
+      AND ( LOWER(campaign) NOT LIKE 'seekhomalayalam%' OR campaign IS NULL )
+),
+seekho_re AS (
+    SELECT DISTINCT
+        seekho_ula.date_tz AS date_tz,
+        firebase_uid AS user_id,
+        uup.user_ptr_id AS profile_id,
+        CASE
+             WHEN seekho_ula.`Media Source` IS NULL                   THEN 'null'
+             WHEN LOWER(seekho_ula.`Media Source`) LIKE '%googleadwords%' THEN 'google'
+             WHEN LOWER(seekho_ula.`Media Source`) LIKE '%facebook%'      THEN 'facebook'
+             WHEN LOWER(seekho_ula.`Media Source`) LIKE '%snapchat%'      THEN 'snapchat'
+             ELSE LOWER(seekho_ula.`Media Source`)
+        END AS source,
+        CASE WHEN seekho_ula.campaign IS NULL THEN 'null' ELSE LOWER(seekho_ula.campaign) END AS campaign,
+        CASE
+             WHEN seekho_ula.Adset IS NULL                           THEN 'null'
+             WHEN LOWER(seekho_ula.campaign) LIKE '%female%'         THEN CONCAT(LOWER(seekho_ula.Adset), " - female")
+             ELSE LOWER(seekho_ula.Adset)
+        END AS ad_set,
+        seekho_paid.payment_date,
+        seekho_paid.pgw_amount
+    FROM seekho_ula
+    LEFT JOIN seekho_ad_id
+           ON seekho_ula.`Advertising ID` = seekho_ad_id.gaid
+          AND seekho_ad_id.gaid NOT IN ('00000000-0000-0000-0000-000000000000','0000-0000')
+    LEFT JOIN `seekho-c084b.seekho.users_userprofile` uup ON seekho_ad_id.profile_id = uup.user_ptr_id
+    LEFT JOIN seekho_paid                                   ON uup.user_ptr_id = seekho_paid.profile_id
+),
+seekho_pre_d0_data AS (
+    SELECT
+        DATE(pph.purchased_on, "Asia/Kolkata") AS Payment_date,
+        (CASE
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on,  "Asia/Kolkata") AS DATE), DAY) >= 0
+              THEN eo.profile_id END) AS Total
+    FROM `seekho-c084b.seekho.experiments_order` AS eo
+    LEFT JOIN `seekho-c084b.seekho.experiments_profilepurchasehistory` AS pph ON eo.id = pph.order_id
+    LEFT JOIN `seekho-c084b.seekho.payments_subscriptionvalidity` AS ps        ON ps.purchase_record_id = pph.id
+    LEFT JOIN `seekho-c084b.seekho.users_userprofile` uup                      ON eo.profile_id = uup.user_ptr_id
+    WHERE eo.is_prod = TRUE
+      AND pph.is_prod = TRUE
+      AND eo.status = 'order_paid'
+      AND ( eo.order_source IN ('android','com.seekho.android','ios','com.seekho.ios','web','com.seekho.web')
+            OR eo.order_source IS NULL )
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND eo.premium_plan_id IS NOT NULL
+      AND CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE) >= '2025-01-01'
+      AND eo.profile_id NOT IN (SELECT profile_id FROM vidhya_account_payers)
+),
+seekho_d0_data AS (
+  SELECT
+    a.Payment_date,
+    COUNT(DISTINCT a.total) AS total
+  FROM seekho_pre_d0_data a
+  WHERE NOT EXISTS (
+    SELECT 1
+    FROM seekho_re b
+    WHERE a.total = b.profile_id
+      AND ( LOWER(b.campaign) LIKE '%gtm%'
+         OR LOWER(b.campaign) IN ('health scaling abo campaign')
+         OR LOWER(b.ad_set)   LIKE '%gtm%' )
+  )
+  GROUP BY 1
+),
+
+arivu_d0_data AS (
+    SELECT 
+        DATE(pph.purchased_on, "Asia/Kolkata") AS Payment_date,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) = 0 
+              THEN eo.profile_id END) AS D0,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) > 0 
+              THEN eo.profile_id END) AS D0_Plus,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) >= 0 
+              THEN eo.profile_id END) AS Total,
+    FROM seekho.experiments_order AS eo
+    LEFT JOIN seekho.experiments_profilepurchasehistory AS pph ON eo.id = pph.order_id
+    LEFT JOIN seekho.payments_subscriptionvalidity AS ps ON ps.purchase_record_id = pph.id
+    LEFT JOIN seekho.users_userprofile uup ON eo.profile_id = uup.user_ptr_id
+    WHERE eo.is_prod = TRUE 
+      AND pph.is_prod = TRUE
+      AND eo.status = 'order_paid'
+      AND (eo.order_source like '%arivu%')
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND eo.premium_plan_id IS NOT NULL
+      AND CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE) >= '2025-01-01'
+    GROUP BY DATE(pph.purchased_on, "Asia/Kolkata")
+),
+
+vidhya_d0_data AS (
+    SELECT
+        DATE(pph.purchased_on, "Asia/Kolkata") AS Payment_date,
+        COUNT(DISTINCT CASE
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) = 0
+              THEN eo.profile_id END) AS D0,
+        COUNT(DISTINCT CASE
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) > 0
+              THEN eo.profile_id END) AS D0_Plus,
+        COUNT(DISTINCT CASE
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) >= 0
+              THEN eo.profile_id END) AS Total
+    FROM `seekho-c084b.seekho.experiments_order` AS eo
+    LEFT JOIN `seekho-c084b.seekho.experiments_profilepurchasehistory` AS pph ON eo.id = pph.order_id
+    LEFT JOIN `seekho-c084b.seekho.payments_subscriptionvalidity` AS ps        ON ps.purchase_record_id = pph.id
+    LEFT JOIN `seekho-c084b.seekho.users_userprofile` uup                      ON eo.profile_id = uup.user_ptr_id
+    WHERE eo.is_prod = TRUE
+      AND pph.is_prod = TRUE
+      AND eo.status = 'order_paid'
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND eo.premium_plan_id IS NOT NULL
+      AND CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE) >= '2025-01-01'
+      AND (
+            eo.order_source LIKE '%vidhya%'
+         OR eo.profile_id IN (SELECT profile_id FROM vidhya_account_payers)
+      )
+    GROUP BY DATE(pph.purchased_on, "Asia/Kolkata")
+),
+
+kali_d0_data AS (
+    SELECT 
+        DATE(pph.purchased_on, "Asia/Kolkata") AS Payment_date,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) = 0 
+              THEN eo.profile_id END) AS D0,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) > 0 
+              THEN eo.profile_id END) AS D0_Plus,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) >= 0 
+              THEN eo.profile_id END) AS Total,
+    FROM seekho.experiments_order AS eo
+    LEFT JOIN seekho.experiments_profilepurchasehistory AS pph ON eo.id = pph.order_id
+    LEFT JOIN seekho.payments_subscriptionvalidity AS ps ON ps.purchase_record_id = pph.id
+    LEFT JOIN seekho.users_userprofile uup ON eo.profile_id = uup.user_ptr_id
+    WHERE eo.is_prod = TRUE 
+      AND pph.is_prod = TRUE
+      AND eo.status = 'order_paid'
+      AND (eo.order_source like '%kali%')
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND eo.premium_plan_id IS NOT NULL
+      AND CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE) >= '2025-01-01'
+    GROUP BY DATE(pph.purchased_on, "Asia/Kolkata")
+),
+
+nerchuko_d0_data AS (
+    SELECT 
+        DATE(pph.purchased_on, "Asia/Kolkata") AS Payment_date,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) = 0 
+              THEN eo.profile_id END) AS D0,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) > 0 
+              THEN eo.profile_id END) AS D0_Plus,
+        COUNT(DISTINCT CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) >= 0 
+              THEN eo.profile_id END) AS Total,
+    FROM seekho.experiments_order AS eo
+    LEFT JOIN seekho.experiments_profilepurchasehistory AS pph ON eo.id = pph.order_id
+    LEFT JOIN seekho.payments_subscriptionvalidity AS ps ON ps.purchase_record_id = pph.id
+    LEFT JOIN seekho.users_userprofile uup ON eo.profile_id = uup.user_ptr_id
+    WHERE eo.is_prod = TRUE 
+      AND pph.is_prod = TRUE
+      AND eo.status = 'order_paid'
+      AND (eo.order_source like '%nerchuko%')
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND eo.premium_plan_id IS NOT NULL
+      AND CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE) >= '2025-01-01'
+    GROUP BY DATE(pph.purchased_on, "Asia/Kolkata")
+),
+
+overall_paid AS (
+    SELECT 
+        DISTINCT 
+        DATE(pph.purchased_on, 'Asia/Kolkata') AS payment_date,
+        eo.id,
+        eo.profile_id,
+        pgw_amount
+    FROM seekho.experiments_order eo
+    LEFT JOIN seekho.experiments_profilepurchasehistory pph ON eo.id = pph.order_id 
+    LEFT JOIN `seekho-c084b.seekho.payments_subscriptionvalidity` sv ON pph.id = sv.purchase_record_id
+    WHERE TRUE
+      AND eo.status = 'order_paid'
+      AND eo.premium_item_id IS NULL 
+      AND eo.is_prod = TRUE
+	  AND (eo.order_source not in ('com.seekhoglobal.android', 'com.seekhoai.android','com.seekhojunior.android','com.bolo.androie','com.bolo.android') or eo.order_source is null)
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND DATE(pph.purchased_on, 'Asia/Kolkata') >= DATE_SUB(CURRENT_DATE('Asia/Kolkata'), INTERVAL 90 DAY)
+      AND DATE(pph.purchased_on, 'Asia/Kolkata') < CURRENT_DATE('Asia/Kolkata')
+),
+overall_ad_id AS (
+    SELECT DISTINCT 
+        profile_id,
+        advertising_id AS gaid,
+        DATE(MAX(date(created_on, 'Asia/Kolkata'))) AS date_created
+    FROM `seekho-c084b.seekho.users_userappinfo`
+    WHERE TRUE
+    GROUP BY 1,2
+),
+overall_ula AS (
+    SELECT *, DATE(`Install Time`, 'Asia/Kolkata') as date_tz
+    FROM seekho-c084b.appsflyer.installs
+    WHERE DATE(`Install Time`, 'Asia/Kolkata') >= DATE_SUB(CURRENT_DATE('Asia/Kolkata'), INTERVAL 90 DAY)
+      AND `Advertising ID` <> '00000000-0000-0000-0000-000000000000'
+      AND `Advertising ID` <> '0000-0000'
+      and (`Bundle ID` not in ('com.seekhoglobal.android', 'com.seekhoai.android','com.seekhojunior.android','com.bolo.androie','com.bolo.android') or `Bundle ID` is null) 
+),
+overall_re AS (
+    SELECT DISTINCT
+        overall_ula.date_tz AS date_tz,
+        firebase_uid AS user_id,
+        uup.user_ptr_id as profile_id,
+        CASE 
+             WHEN overall_ula.`Media Source` IS NULL THEN 'null'
+             WHEN LOWER(overall_ula.`Media Source`) LIKE '%googleadwords%' THEN 'google'
+             WHEN LOWER(overall_ula.`Media Source`) LIKE '%facebook%' THEN 'facebook'
+             WHEN LOWER(overall_ula.`Media Source`) LIKE '%snapchat%' THEN 'snapchat'
+             ELSE LOWER(overall_ula.`Media Source`)
+        END AS source,
+        CASE 
+             WHEN overall_ula.campaign IS NULL THEN 'null'
+             ELSE LOWER(overall_ula.campaign)
+        END AS campaign,
+        CASE 
+             WHEN overall_ula.Adset IS NULL THEN 'null'
+             WHEN LOWER(overall_ula.campaign) LIKE '%female%' THEN CONCAT(LOWER(overall_ula.Adset), " - female")
+             ELSE LOWER(overall_ula.Adset)
+        END AS ad_set,
+        overall_paid.payment_date,
+        overall_paid.pgw_amount
+    FROM overall_ula
+    LEFT JOIN overall_ad_id ON overall_ula.`Advertising ID` = overall_ad_id.gaid AND overall_ad_id.gaid NOT IN ('00000000-0000-0000-0000-000000000000', '0000-0000')
+    LEFT JOIN seekho.users_userprofile uup ON overall_ad_id.profile_id = uup.user_ptr_id 
+    LEFT JOIN overall_paid ON uup.user_ptr_id = overall_paid.profile_id
+    WHERE TRUE
+),
+overall_pre_d0_data AS (
+    SELECT 
+        DATE(pph.purchased_on, "Asia/Kolkata") AS Payment_date,
+        
+        (CASE 
+              WHEN DATE_DIFF(CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE),
+                             CAST(DATE(uup.signedup_on, "Asia/Kolkata") AS DATE), DAY) >= 0 
+              THEN eo.profile_id END) AS Total,
+    FROM seekho.experiments_order AS eo
+    LEFT JOIN seekho.experiments_profilepurchasehistory AS pph ON eo.id = pph.order_id
+    LEFT JOIN seekho.payments_subscriptionvalidity AS ps ON ps.purchase_record_id = pph.id
+    LEFT JOIN seekho.users_userprofile uup ON eo.profile_id = uup.user_ptr_id
+    WHERE eo.is_prod = TRUE 
+      AND pph.is_prod = TRUE
+      AND eo.status = 'order_paid'
+      AND (eo.order_source not in ('com.seekhoglobal.android', 'com.seekhoai.android','com.seekhojunior.android','com.bolo.androie','com.bolo.android') or eo.order_source is null)
+      AND (subscription_type LIKE '%new%' OR subscription_type LIKE '%monthly%')
+      AND eo.premium_plan_id IS NOT NULL
+      AND CAST(DATE(pph.purchased_on, "Asia/Kolkata") AS DATE) >= '2025-01-01'
+),
+overall_d0_data as (
+  select
+    a.Payment_date,
+    count(distinct a.total) as total
+  from overall_pre_d0_data a
+  where not exists 
+  (
+    select 1
+    from overall_re b
+    where a.total = b.profile_id
+      and (lower(b.campaign) like '%gtm%'
+      or lower(b.campaign) in ('health scaling abo campaign')
+      or lower(b.ad_set) like '%gtm%'
+   )
+  )
+  group by 1
+),
+
+all_dates AS (
+    SELECT Payment_date FROM seekho_d0_data
+    UNION DISTINCT
+    SELECT Payment_date FROM arivu_d0_data
+    UNION DISTINCT
+    SELECT Payment_date FROM vidhya_d0_data
+    UNION DISTINCT
+    SELECT Payment_date FROM kali_d0_data
+    UNION DISTINCT
+    SELECT Payment_date FROM nerchuko_d0_data
+    UNION DISTINCT
+    SELECT Payment_date FROM overall_d0_data
+)
+
+SELECT
+    date(dt.Payment_date) as date,
+    sk.total                                                       AS seekho_Do_orders,
+    ar.Total                                                       AS arivu_Do_orders,
+    vi.Total                                                       AS vidhya_Do_orders,
+    ka.Total                                                       AS kali_Do_orders,
+    ne.Total                                                       AS nerchuko_Do_orders,
+    sk.total
+      + ar.Total
+      + vi.Total
+      + ka.Total
+      + ne.Total                                                   AS sum_of_sources_Do_orders,
+    ov.total                                                       AS overall_Do_orders,
+    sk.total
+      + ar.Total
+      + vi.Total
+      + ka.Total
+      + ne.Total
+      - ov.total                                                   AS difference,
+    CASE
+        WHEN sk.total
+           + ar.Total
+           + vi.Total
+           + ka.Total
+           + ne.Total
+           = ov.total
+        THEN 'MATCH'
+        ELSE 'MISMATCH'
+    END                                                            AS validation_status
+
+FROM all_dates dt
+LEFT JOIN seekho_d0_data   sk ON date(dt.Payment_date) = date(sk.Payment_date)
+LEFT JOIN arivu_d0_data    ar ON date(dt.Payment_date) = date(ar.Payment_date)
+LEFT JOIN vidhya_d0_data   vi ON date(dt.Payment_date) = date(vi.Payment_date)
+LEFT JOIN kali_d0_data     ka ON date(dt.Payment_date) = date(ka.Payment_date)
+LEFT JOIN nerchuko_d0_data ne ON date(dt.Payment_date) = date(ne.Payment_date)
+LEFT JOIN overall_d0_data  ov ON date(dt.Payment_date) = date(ov.Payment_date)
+where date(dt.Payment_date) between DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 60 DAY) and DATE_SUB(CURRENT_DATE("Asia/Kolkata"), INTERVAL 1 DAY)
+ORDER BY dt.Payment_date DESC
